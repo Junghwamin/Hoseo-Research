@@ -148,9 +148,12 @@ def _():
     assert csv_path.exists(), f"파일 없음: {csv_path}"
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
     assert len(df) > 0, "빈 DataFrame"
+    # 이 파일은 '레거시' 포맷이다. 신포맷(권역별_순위.csv)과 달리 권역명 열이 없고
+    # 순위 열 이름이 '충청권순위' 다. data_loader._ensure_new_format 이 변환한다.
     required_cols = ["연도", "학교명", "전임교원수", "SCI/SCOPUS논문수", "1인당논문수", "충청권순위", "전국순위"]
     for col in required_cols:
         assert col in df.columns, f"컬럼 누락: {col}"
+    assert "권역명" not in df.columns, "레거시 CSV 에 권역명이 있으면 신포맷으로 바뀐 것이다"
     print(f"       → {len(df)}행, 연도: {sorted(df['연도'].unique())}")
 
 @test("config 디렉터리 존재")
@@ -212,7 +215,7 @@ def _():
         assert data["전임교원수"] > 0, f"{year}년: 전임교원수가 0"
     print(f"       → {len(trend)}개년 데이터")
     for y, d in sorted(trend.items()):
-        print(f"         {y}년: 1인당논문수={d['1인당논문수']}, 충청권={d.get('충청권순위')}, 전국={d['전국순위']}")
+        print(f"         {y}년: 1인당논문수={d['1인당논문수']}, 권역={d.get('권역순위')}, 전국={d['전국순위']}")
 
 hoseo_trend = dl.get_hoseo_trend(nat_df, reg_df)
 
@@ -222,7 +225,7 @@ def _():
     assert len(avgs) > 0
     for year, data in avgs.items():
         assert "전국평균" in data
-        assert "충청권평균" in data
+        assert "권역평균" in data
         assert "비교군평균" in data
         assert data["전국평균"] > 0, f"{year}년: 전국평균이 0"
     print(f"       → {latest_year}년 전국평균={avgs[latest_year]['전국평균']}")
@@ -234,7 +237,7 @@ def _():
     ranks = dl.get_rank_changes(nat_df, reg_df)
     assert len(ranks) > 0
     for year, data in ranks.items():
-        assert "충청권순위" in data
+        assert "권역순위" in data
         assert "전국순위" in data
     # 최소 2년 이상이면 변화값 존재
     if len(ranks) >= 2:
@@ -480,7 +483,7 @@ def _():
     # 컬럼 구조 확인
     for col in ["연도", "학교명", "전임교원수", "SCI/SCOPUS논문수", "1인당논문수", "전국순위"]:
         assert col in nat_mem.columns, f"전국 데이터 컬럼 누락: {col}"
-    for col in ["연도", "학교명", "전임교원수", "SCI/SCOPUS논문수", "1인당논문수", "충청권순위", "전국순위"]:
+    for col in ["연도", "학교명", "전임교원수", "SCI/SCOPUS논문수", "1인당논문수", "권역명", "권역순위", "전국순위"]:
         assert col in reg_mem.columns, f"충청권 데이터 컬럼 누락: {col}"
 
     print(f"       → 전국 {len(nat_mem)}행, 충청권 {len(reg_mem)}행")
@@ -558,23 +561,31 @@ def _():
             return f"text_area에 value=와 key= 동시 사용 발견: {call[:80]}..."
     return True
 
-@test("app.py - _go() 함수에서 narrative 백업/복원 확인")
+@test("research.py - _go() 함수에서 narrative 백업/복원 확인")
 def _():
-    app_path = PROJECT_ROOT / "report_app" / "app.py"
+    # _go 와 _saved_* 는 app.py 가 아니라 pages/research.py 에 있다.
+    app_path = PROJECT_ROOT / "report_app" / "pages" / "research.py"
     content = app_path.read_text(encoding="utf-8")
     assert "_saved_narrative_trend" in content, "_saved_ 백업 키 누락"
     assert "_saved_narrative_comparison" in content
     assert "_saved_narrative_regional" in content
     assert "_saved_narrative_yoy" in content
 
-@test("app.py - Step 5에서 _saved_ 키 우선 참조 확인")
+@test("research.py - Step 5에서 _saved_ 키 우선 참조 확인")
 def _():
-    app_path = PROJECT_ROOT / "report_app" / "app.py"
+    app_path = PROJECT_ROOT / "report_app" / "pages" / "research.py"
     content = app_path.read_text(encoding="utf-8")
-    # Step 5의 narratives 딕셔너리에서 _saved_ 키를 먼저 확인하는지
-    assert "_saved_narrative_trend" in content
-    # .get("_saved_narrative_trend", ...) 패턴 확인
-    assert 'get("_saved_narrative_trend"' in content, "Step 5에서 _saved_ 우선 참조 없음"
+    # Step 5 는 _saved_ 키를 위젯 키보다 **먼저** 봐야 한다(V07).
+    # 소스가 여러 줄로 감싸여 있으므로 리터럴이 아니라 공백 무관 정규식으로 본다.
+    import re
+    for key in ("trend", "comparison", "regional", "yoy"):
+        pat = re.compile(
+            r'get\(\s*"_saved_narrative_%s"\s*,\s*st\.session_state\.get\(\s*"narrative_%s"'
+            % (key, key)
+        )
+        assert pat.search(content), (
+            f"Step 5 에서 _saved_narrative_{key} 를 narrative_{key} 보다 먼저 참조하지 않는다"
+        )
 
 @test("app.py - _get_api_key() 플레이스홀더 필터링")
 def _():
@@ -663,22 +674,27 @@ print("\n🌐 [HTTP 접근 테스트]")
 # ================================================================
 
 import urllib.request
+import urllib.error
 
 @test("Streamlit 앱 HTTP 200 응답")
 def _():
     try:
-        resp = urllib.request.urlopen("http://localhost:8502", timeout=10)
+        resp = urllib.request.urlopen("http://localhost:8501", timeout=10)
         assert resp.status == 200
         html = resp.read().decode()
         assert len(html) > 100
         print(f"       → {len(html):,} bytes HTML")
+    except urllib.error.URLError as e:
+        # 서버를 띄우지 않고 돌리는 것이 기본이다(CI 포함). 연결 거부는 FAIL 이 아니다.
+        warn(f"Streamlit 서버 미기동 (무시 가능): {e}")
+        return True
     except Exception as e:
         return f"HTTP 접근 실패: {e}"
 
 @test("Streamlit health endpoint")
 def _():
     try:
-        resp = urllib.request.urlopen("http://localhost:8502/_stcore/health", timeout=5)
+        resp = urllib.request.urlopen("http://localhost:8501/_stcore/health", timeout=5)
         assert resp.status == 200
     except Exception as e:
         warn(f"health endpoint 실패 (무시 가능): {e}")

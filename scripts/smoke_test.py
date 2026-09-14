@@ -36,8 +36,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRIGGER_FILES = {"config.py", "data_loader.py", "chart_generator.py"}
 
 SMOKE_CODE = r"""
+# 주의: 이 문자열은 `python -c` 로 실행되므로 __file__ 이 없고 Path 도 아직 없다.
+# 예전에는 여기서 Path(__file__) 을 참조해 **항상** NameError 로 끝났고,
+# 훅이 exit 0 을 돌려주는 바람에 스모크 테스트가 도는 것처럼 보였다.
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pathlib import Path
+
+sys.path.insert(0, PROJECT_ROOT_PLACEHOLDER)
 
 try:
     # 1. 모듈 로드
@@ -56,7 +61,7 @@ try:
 
     nat, reg = load_all_data()
     assert len(nat) > 0, "전국 데이터 비어 있음"
-    assert len(reg) > 0, "충청권 데이터 비어 있음"
+    assert len(reg) > 0, "권역 데이터 비어 있음"
 
     # 3. 통계 함수 호출
     years = get_available_years(nat)
@@ -77,7 +82,7 @@ try:
     assert isinstance(img, BytesIO), "차트 반환값이 BytesIO가 아님"
     assert img.getbuffer().nbytes > 1000, "차트 이미지 크기 이상"
 
-    print(f"OK: {len(nat)}행(전국) / {len(reg)}행(충청권) / {len(years)}개년 / 차트 {img.getbuffer().nbytes}bytes")
+    print(f"OK: {len(nat)}행(전국) / {len(reg)}행(권역) / {len(years)}개년 / 차트 {img.getbuffer().nbytes}bytes")
 
 except AssertionError as e:
     print(f"FAIL: {e}")
@@ -103,7 +108,9 @@ try:
     print(f"[스모크 테스트] {fname} 변경 감지 → 파이프라인 검증 중...", file=sys.stderr)
 
     result = subprocess.run(
-        [sys.executable, "-c", SMOKE_CODE],
+        [sys.executable, "-c", SMOKE_CODE.replace(
+            "PROJECT_ROOT_PLACEHOLDER", repr(str(PROJECT_ROOT))
+        )],
         capture_output=True,
         text=True,
         encoding="utf-8",
