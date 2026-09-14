@@ -223,7 +223,7 @@ pytest -q -m "not live"
 # smoke_test.py 는 PostToolUse 훅이라 stdin 으로 JSON 페이로드를 받는다.
 # 그냥 실행하면 빈 stdin 을 파싱하다 조용히 exit 0 으로 끝난다.
 echo '{"tool_input":{"file_path":"report_app/data_loader.py"}}' | python scripts/smoke_test.py
-[스모크 테스트 ✓] data_loader.py — OK: 1308행(전국) / 1368행(권역) / 10개년 / 차트 96287bytes
+[스모크 테스트 ✓] data_loader.py — OK: 1441행(전국) / 1507행(권역) / 11개년 / 차트 95078bytes
 
 python e2e_test_full.py
 PASS 50 / FAIL 0 / WARN 3            # exit 0
