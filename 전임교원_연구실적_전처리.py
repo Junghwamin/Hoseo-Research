@@ -46,6 +46,15 @@ REGION_MAP: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# 파일명 연도 추출 패턴 (로컬 스캔 경로 / 업로드 경로 공통)
+# ---------------------------------------------------------------------------
+# 'YYYY년'과 'YYYY_' 두 형식을 모두 인정한다.
+# 예전에는 scan_raw_files가 'YYYY년'만, process_in_memory가 둘 다 받아들여
+# 같은 파일이 Raw data/에 두면 무시되고 업로드하면 처리되는 불일치가 있었다.
+YEAR_PATTERN = re.compile(r"(\d{4})(?:년|_)")
+
+
+# ---------------------------------------------------------------------------
 # 1. 설정 파일 로드
 # ---------------------------------------------------------------------------
 def load_config(config_dir: Path):
@@ -99,18 +108,27 @@ def scan_raw_files(raw_dir: Path) -> dict[int, Path]:
     '년' 같은 한글이 자모로 분해되어 정규식 매칭이 실패할 수 있다.
     NFC 정규화를 적용하여 크로스플랫폼 호환성을 확보한다.
 
+    같은 연도의 파일이 여러 개면 파일명 오름차순으로 마지막 것만 쓰이므로,
+    어느 파일이 무시되고 어느 파일이 채택됐는지 경고로 알린다.
+
     Returns:
         {연도(int): 파일경로(Path)} - 연도 오름차순 정렬
     """
     year_files: dict[int, Path] = {}
-    pattern = re.compile(r"(\d{4})년")
 
-    for fpath in raw_dir.glob("*.xlsx"):
+    # glob 순서는 파일시스템에 따라 달라지므로, 채택 결과를 고정하기 위해 정렬한다.
+    for fpath in sorted(raw_dir.glob("*.xlsx")):
         # macOS NFD → NFC 정규화 (한글 자모 분해 방지)
         normalized_name = unicodedata.normalize("NFC", fpath.name)
-        match = pattern.search(normalized_name)
+        match = YEAR_PATTERN.search(normalized_name)
         if match:
             year = int(match.group(1))
+            previous = year_files.get(year)
+            if previous is not None:
+                print(
+                    f"  [경고] {year}년 파일이 2개 이상입니다. "
+                    f"'{previous.name}'은(는) 무시하고 '{fpath.name}'을(를) 사용합니다."
+                )
             year_files[year] = fpath
 
     # 연도 오름차순 정렬
@@ -120,6 +138,30 @@ def scan_raw_files(raw_dir: Path) -> dict[int, Path]:
 # ---------------------------------------------------------------------------
 # 3. 컬럼 자동 탐지
 # ---------------------------------------------------------------------------
+def _header_text(df: pd.DataFrame, row_idx: int, col_idx: int) -> str:
+    """헤더 셀을 비교용 문자열로 정규화한다(줄바꿈 제거 + 양끝 공백 제거)."""
+    val = df.iloc[row_idx, col_idx]
+    if pd.isna(val):
+        return ""
+    return str(val).replace("\n", "").strip()
+
+
+def _header_group_span(df: pd.DataFrame, header_row: int, header_col: int) -> tuple[int, int]:
+    """헤더 셀이 덮는 컬럼 구간 [시작, 끝)을 구한다.
+
+    병합된 헤더 셀은 첫 컬럼에만 값이 있고 나머지는 NaN이므로,
+    같은 행에서 다음으로 값이 있는 컬럼 직전까지가 그 그룹의 범위다.
+    (2017년 SCI 그룹 → [19, 21), 2016년 → [12, 13), 2018/2025년 → [24, 27))
+    """
+    n_cols = df.shape[1]
+    end = header_col + 1
+    for col_idx in range(header_col + 1, n_cols):
+        if _header_text(df, header_row, col_idx):
+            break
+        end = col_idx + 1
+    return header_col, end
+
+
 def find_columns(df: pd.DataFrame) -> dict:
     """
     header=None으로 읽은 DataFrame에서 멀티레벨 헤더를 분석하여
@@ -130,7 +172,9 @@ def find_columns(df: pd.DataFrame) -> dict:
             "학교명": int,        # 학교명 컬럼 인덱스
             "학교종류": int,      # 학교종류 컬럼 인덱스
             "전임교원수": int,    # 전임교원수(계) 컬럼 인덱스
-            "SCI논문수": int,     # SCI/SCOPUS 논문수(계) 컬럼 인덱스
+            "SCI논문수": int | list[int],  # SCI/SCOPUS 논문수 컬럼.
+                                  # '계' 하위 헤더가 없고 '남'/'여'로만 나뉜
+                                  # 2017년 포맷에서는 합산할 컬럼 목록을 돌려준다.
             "data_start_row": int # 실제 데이터 시작 행
         }
     """
@@ -251,8 +295,23 @@ def find_columns(df: pd.DataFrame) -> dict:
             if sci_col is not None:
                 break
 
-        # "계" 하위 헤더가 없는 구형 포맷(2016년 등)은
-        # SCI/SCOPUS 헤더 컬럼 자체가 곧 데이터 컬럼이므로 그대로 사용
+        # "계" 하위 헤더가 없는 포맷은 두 가지다.
+        #   (a) 2017년: 그룹이 '남'/'여' 두 열로만 쪼개져 있다.
+        #       헤더 열을 그대로 쓰면 '남'(19)만 집계되어 분자는 남성 교원 논문수,
+        #       분모는 전체 교원수가 된다. 두 열을 합산해야 하므로 목록을 돌려준다.
+        #   (b) 2016년: 성별 분리 자체가 없어 헤더 컬럼이 곧 데이터 컬럼이다.
+        if sci_col is None:
+            group_start, group_end = _header_group_span(df, sci_header_row, sci_header_col)
+            for row_idx in range(sci_header_row + 1, n_rows):
+                gender_cols = [
+                    col_idx
+                    for col_idx in range(group_start, group_end)
+                    if _header_text(df, row_idx, col_idx) in ("남", "여")
+                ]
+                if gender_cols:
+                    sci_col = gender_cols
+                    break
+
         if sci_col is None:
             sci_col = sci_header_col
 
@@ -315,6 +374,42 @@ def find_columns(df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # 4. Excel 읽기
 # ---------------------------------------------------------------------------
+def _numeric_column(body: pd.DataFrame, col_spec) -> pd.Series:
+    """데이터 영역에서 숫자 컬럼 하나를 뽑는다.
+
+    col_spec이 컬럼 목록이면(2017년 SCI의 '남'/'여'처럼 '계'가 없는 포맷)
+    각 컬럼을 먼저 숫자로 변환한 뒤 합산한다. 문자열 상태로 더하면
+    이어붙기가 되고, 한쪽이 결측이면 합계 전체가 NaN이 되기 때문이다.
+    """
+    col_indices = col_spec if isinstance(col_spec, (list, tuple)) else [col_spec]
+    total = None
+    for col_idx in col_indices:
+        series = pd.to_numeric(body.iloc[:, col_idx], errors="coerce").fillna(0.0)
+        total = series if total is None else total + series
+    return total
+
+
+def _build_frame(df_raw: pd.DataFrame, cols: dict) -> pd.DataFrame:
+    """find_columns 결과로 데이터 영역만 잘라 정제된 DataFrame을 만든다.
+
+    로컬 파일 경로(read_excel)와 업로드 경로(process_in_memory)가 공유한다.
+    "지역" 컬럼이 존재하면 함께 추출한다 (권역 분류에 사용).
+    """
+    body = df_raw.iloc[cols["data_start_row"]:]
+
+    # 컬럼 순서 = 학교명, 학교종류, (지역), 전임교원수, SCI논문수
+    data = {
+        "학교명": body.iloc[:, cols["학교명"]].astype(str).str.strip(),
+        "학교종류": body.iloc[:, cols["학교종류"]].astype(str).str.strip(),
+    }
+    if cols.get("지역") is not None:
+        data["지역"] = body.iloc[:, cols["지역"]].astype(str).str.strip()
+    data["전임교원수"] = _numeric_column(body, cols["전임교원수"])
+    data["SCI논문수"] = _numeric_column(body, cols["SCI논문수"])
+
+    return pd.DataFrame(data).reset_index(drop=True)
+
+
 def read_excel(file_path: Path) -> pd.DataFrame:
     """
     Excel 파일을 읽어 필요한 컬럼만 추출하고 정제된 DataFrame을 반환한다.
@@ -323,33 +418,7 @@ def read_excel(file_path: Path) -> pd.DataFrame:
     """
     df_raw = pd.read_excel(file_path, header=None)
     cols = find_columns(df_raw)
-
-    data_start = cols["data_start_row"]
-
-    # 필요한 컬럼 목록 구성 (지역 컬럼은 존재할 때만 포함)
-    col_indices = [cols["학교명"], cols["학교종류"]]
-    col_names = ["학교명", "학교종류"]
-
-    if cols.get("지역") is not None:
-        col_indices.append(cols["지역"])
-        col_names.append("지역")
-
-    col_indices.extend([cols["전임교원수"], cols["SCI논문수"]])
-    col_names.extend(["전임교원수", "SCI논문수"])
-
-    df = df_raw.iloc[data_start:, col_indices].copy()
-    df.columns = col_names
-
-    # 타입 변환
-    df["학교명"] = df["학교명"].astype(str).str.strip()
-    df["학교종류"] = df["학교종류"].astype(str).str.strip()
-    if "지역" in df.columns:
-        df["지역"] = df["지역"].astype(str).str.strip()
-    df["전임교원수"] = pd.to_numeric(df["전임교원수"], errors="coerce").fillna(0.0)
-    df["SCI논문수"] = pd.to_numeric(df["SCI논문수"], errors="coerce").fillna(0.0)
-
-    df = df.reset_index(drop=True)
-    return df
+    return _build_frame(df_raw, cols)
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +437,7 @@ def filter_universities(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def merge_campuses(
     df: pd.DataFrame, name_mapping: dict[str, str]
-) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+) -> tuple[pd.DataFrame, dict[str, list[str]], list[str]]:
     """
     name_mapping을 사용해 각 학교명을 정규명(canonical name)으로 변환하고,
     동일 대학의 캠퍼스 데이터를 합산한다.
@@ -378,10 +447,16 @@ def merge_campuses(
     대학별 권역 목록(univ_region_map)을 생성한다.
     다중 캠퍼스 대학은 해당하는 모든 권역에 등록된다.
 
+    제외된 대학은 예전에 stdout 경고로만 알려져 호출자가 사용자에게 전달할
+    방법이 없었다. 이후 계산되는 '전국순위'·'전국평균'은 실제 전국이 아니라
+    universities.json에 등재된 대학 안에서의 값이므로, 제외 목록을
+    반환값으로도 노출한다(순위 계산식과 등재 목록 자체는 그대로 둔다).
+
     Returns:
-        (merged_df, univ_region_map)
+        (merged_df, univ_region_map, excluded_names)
         - merged_df: 캠퍼스 합산된 DataFrame
         - univ_region_map: {"단국대학교": ["수도권", "충청권"], "호서대학교": ["충청권"], ...}
+        - excluded_names: universities.json 미등재로 제외된 학교명 목록(가나다순)
     """
     canonical_names = []
     unmatched = set()
@@ -393,8 +468,10 @@ def merge_campuses(
             canonical_names.append(None)
             unmatched.add(name)
 
+    excluded_names = sorted(unmatched)
+
     # 매칭되지 않은 대학 경고 출력
-    for name in sorted(unmatched):
+    for name in excluded_names:
         print(f"  [경고] '{name}'이(가) universities.json에 없습니다. 결과에서 제외됩니다.")
 
     df = df.copy()
@@ -425,7 +502,7 @@ def merge_campuses(
     )
     merged = merged.rename(columns={"정규명": "학교명"})
     merged = merged.reset_index(drop=True)
-    return merged, univ_region_map
+    return merged, univ_region_map, excluded_names
 
 
 # ---------------------------------------------------------------------------
@@ -493,8 +570,10 @@ def calculate_rankings(
 
         if regional_frames:
             regional_df = pd.concat(regional_frames, ignore_index=True)
+            # 학교명을 마지막 정렬 키로 둔다. pandas 기본 정렬은 불안정해서
+            # 타이브레이커가 없으면 동순위 행의 순서가 입력 순서에 좌우된다.
             regional_df = regional_df.sort_values(
-                ["권역명", "권역순위"]
+                ["권역명", "권역순위", "학교명"]
             ).reset_index(drop=True)
         else:
             regional_df = pd.DataFrame()
@@ -506,10 +585,10 @@ def calculate_rankings(
         rdf["권역순위"] = rdf["1인당논문수"].rank(
             ascending=False, method="min"
         ).astype(int)
-        regional_df = rdf.sort_values("권역순위").reset_index(drop=True)
+        regional_df = rdf.sort_values(["권역순위", "학교명"]).reset_index(drop=True)
 
-    # 정렬
-    national_df = national_df.sort_values("전국순위").reset_index(drop=True)
+    # 정렬 (동순위는 학교명으로 타이브레이크하여 결정적 순서를 보장한다)
+    national_df = national_df.sort_values(["전국순위", "학교명"]).reset_index(drop=True)
 
     return national_df, regional_df
 
@@ -535,7 +614,7 @@ def export_excel(
     national_combined = pd.concat(national_frames, ignore_index=True)
     national_combined = national_combined.rename(columns={"SCI논문수": "SCI/SCOPUS논문수"})
     national_combined = national_combined.sort_values(
-        ["연도", "전국순위"], ascending=[True, True]
+        ["연도", "전국순위", "학교명"], ascending=[True, True, True]
     ).reset_index(drop=True)
 
     # 권역별 데이터 결합
@@ -548,7 +627,7 @@ def export_excel(
     region_combined = pd.concat(region_frames, ignore_index=True)
     region_combined = region_combined.rename(columns={"SCI논문수": "SCI/SCOPUS논문수"})
     region_combined = region_combined.sort_values(
-        ["연도", "권역명", "권역순위"], ascending=[True, True, True]
+        ["연도", "권역명", "권역순위", "학교명"], ascending=[True, True, True, True]
     ).reset_index(drop=True)
 
     # Excel 파일 저장
@@ -586,7 +665,7 @@ def export_csv(
     national_combined = pd.concat(national_frames, ignore_index=True)
     national_combined = national_combined.rename(columns={"SCI논문수": "SCI/SCOPUS논문수"})
     national_combined = national_combined.sort_values(
-        ["연도", "전국순위"], ascending=[True, True]
+        ["연도", "전국순위", "학교명"], ascending=[True, True, True]
     ).reset_index(drop=True)
 
     # 권역별 데이터 결합
@@ -599,7 +678,7 @@ def export_csv(
     region_combined = pd.concat(region_frames, ignore_index=True)
     region_combined = region_combined.rename(columns={"SCI논문수": "SCI/SCOPUS논문수"})
     region_combined = region_combined.sort_values(
-        ["연도", "권역명", "권역순위"], ascending=[True, True, True]
+        ["연도", "권역명", "권역순위", "학교명"], ascending=[True, True, True, True]
     ).reset_index(drop=True)
 
     # CSV 저장 — 새 포맷 (모든 권역)
@@ -618,7 +697,7 @@ def export_csv(
         chungcheong = chungcheong.rename(columns={"권역순위": "충청권순위"})
         chungcheong = chungcheong.drop(columns=["권역명"])
         chungcheong = chungcheong.sort_values(
-            ["연도", "충청권순위"], ascending=[True, True]
+            ["연도", "충청권순위", "학교명"], ascending=[True, True, True]
         ).reset_index(drop=True)
         legacy_csv = output_dir / "충청권_순위.csv"
         chungcheong.to_csv(legacy_csv, index=False, encoding="utf-8-sig")
@@ -673,12 +752,11 @@ def process_in_memory(
     # --- Step 2: 연도별 파일 파싱 및 전처리 ---
     year_data: dict[int, pd.DataFrame] = {}
     year_region_maps: dict[int, dict[str, list[str]]] = {}
-    year_pattern = re.compile(r"(\d{4})(?:년|_)")
 
     for filename, file_bytes in uploaded_files.items():
         # macOS NFD → NFC 정규화 (한글 자모 분해 방지)
         normalized_name = unicodedata.normalize("NFC", filename)
-        match = year_pattern.search(normalized_name)
+        match = YEAR_PATTERN.search(normalized_name)
         if not match:
             raise ValueError(
                 f"파일명 '{filename}'에서 연도를 추출할 수 없습니다. "
@@ -686,35 +764,27 @@ def process_in_memory(
             )
         year = int(match.group(1))
 
+        # 같은 연도 파일이 두 개 이상이면 나중 것이 앞의 것을 덮어쓴다.
+        # 조용히 사라지지 않도록 Excel 파싱 전에 먼저 알린다.
+        if year in year_data:
+            print(
+                f"  [경고] {year}년 파일이 2개 이상입니다. "
+                f"앞서 처리한 파일 대신 '{filename}'을(를) 사용합니다."
+            )
+
         # BytesIO로 Excel 읽기 (파일 시스템 접근 없음)
         df_raw = pd.read_excel(io.BytesIO(file_bytes), header=None)
         cols = find_columns(df_raw)
-        data_start = cols["data_start_row"]
-
-        # 필요한 컬럼 목록 구성 (read_excel 내부 로직 인라인 재현)
-        col_indices = [cols["학교명"], cols["학교종류"]]
-        col_names = ["학교명", "학교종류"]
-
-        if cols.get("지역") is not None:
-            col_indices.append(cols["지역"])
-            col_names.append("지역")
-
-        col_indices.extend([cols["전임교원수"], cols["SCI논문수"]])
-        col_names.extend(["전임교원수", "SCI논문수"])
-
-        df = df_raw.iloc[data_start:, col_indices].copy()
-        df.columns = col_names
-        df["학교명"] = df["학교명"].astype(str).str.strip()
-        df["학교종류"] = df["학교종류"].astype(str).str.strip()
-        if "지역" in df.columns:
-            df["지역"] = df["지역"].astype(str).str.strip()
-        df["전임교원수"] = pd.to_numeric(df["전임교원수"], errors="coerce").fillna(0.0)
-        df["SCI논문수"] = pd.to_numeric(df["SCI논문수"], errors="coerce").fillna(0.0)
-        df = df.reset_index(drop=True)
+        df = _build_frame(df_raw, cols)
 
         # 기존 함수 재사용: 필터링 → 캠퍼스 합산 → 1인당 논문수 계산
         df = filter_universities(df)
-        df, univ_region_map = merge_campuses(df, name_mapping)
+        df, univ_region_map, excluded_names = merge_campuses(df, name_mapping)
+        if excluded_names:
+            print(
+                f"  [주의] {year}년: universities.json 미등재로 {len(excluded_names)}개교가 "
+                f"제외되어 '전국순위'는 등재 {len(df)}개교 기준입니다."
+            )
         df = calculate_metrics(df)
         year_data[year] = df
         year_region_maps[year] = univ_region_map
@@ -756,7 +826,7 @@ def process_in_memory(
     national_combined = pd.concat(national_frames, ignore_index=True)
     national_combined = national_combined.rename(columns={"SCI논문수": "SCI/SCOPUS논문수"})
     national_combined = national_combined.sort_values(
-        ["연도", "전국순위"], ascending=[True, True]
+        ["연도", "전국순위", "학교명"], ascending=[True, True, True]
     ).reset_index(drop=True)
 
     region_frames = []
@@ -768,7 +838,7 @@ def process_in_memory(
     region_combined = pd.concat(region_frames, ignore_index=True)
     region_combined = region_combined.rename(columns={"SCI논문수": "SCI/SCOPUS논문수"})
     region_combined = region_combined.sort_values(
-        ["연도", "권역명", "권역순위"], ascending=[True, True, True]
+        ["연도", "권역명", "권역순위", "학교명"], ascending=[True, True, True, True]
     ).reset_index(drop=True)
 
     return national_combined, region_combined
@@ -807,8 +877,8 @@ def main():
         print(f"    - {f.name}")
     year_files = scan_raw_files(raw_dir)
     if not year_files:
-        print("  [오류] 파일명에서 연도(YYYY년)를 찾을 수 없습니다.")
-        print("  파일명에 '2024년' 같은 연도가 포함되어야 합니다.")
+        print("  [오류] 파일명에서 연도를 찾을 수 없습니다.")
+        print("  파일명에 '2024년' 또는 '2024_' 형태의 연도가 포함되어야 합니다.")
         return
     for year, fpath in year_files.items():
         print(f"  {year}년: {fpath.name}")
@@ -828,8 +898,13 @@ def main():
         df = filter_universities(df)
         print(f"  대학교 필터링 후: {len(df)}개")
 
-        df, univ_region_map = merge_campuses(df, name_mapping)
+        df, univ_region_map, excluded_names = merge_campuses(df, name_mapping)
         print(f"  캠퍼스 합산 후: {len(df)}개 대학")
+        if excluded_names:
+            print(
+                f"  [주의] universities.json 미등재로 {len(excluded_names)}개교 제외 "
+                f"→ 이후 '전국순위'와 '전국평균'은 등재 {len(df)}개교 기준입니다."
+            )
         if univ_region_map:
             region_count = {}
             for regions_list in univ_region_map.values():
