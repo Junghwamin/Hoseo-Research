@@ -1,0 +1,4 @@
+# QA 테스트 전용 의존성. 런타임 의존성은 requirements.txt 참조.
+# pillow 는 matplotlib(>=3.10.5) 의 필수 의존성이라 별도 기재하지 않는다.
+pytest==9.0.2
+pytest-timeout==2.4.0
