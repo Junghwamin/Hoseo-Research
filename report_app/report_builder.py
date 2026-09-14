@@ -55,6 +55,9 @@ def _set_cell_bg(cell, hex_color: str):
 def _set_font(run, size_pt: int = 10, bold: bool = False, color_hex: str | None = None):
     """Run 폰트 스타일 설정."""
     run.font.name = REPORT_FONT
+    # run.font.name 은 w:ascii/w:hAnsi 만 지정한다.
+    # 한글은 eastAsia 계열로 렌더되므로 같은 폰트를 명시해 준다.
+    run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), REPORT_FONT)
     run.font.size = Pt(size_pt)
     run.font.bold = bold
     if color_hex:
@@ -212,7 +215,9 @@ def _add_yoy_table(doc: Document, yoy_changes: dict, year: int):
         _set_font(run, size_pt=9, bold=True, color_hex="FFFFFF")
 
     for row_idx, (gubun, name, prev, curr, rate) in enumerate(rows_data):
-        vals = [gubun, name, f"{prev:.4f}", f"{curr:.4f}", f"{rate:+.1f}%"]
+        # 이전값이 0 인 신규 실적은 증감률을 계산할 수 없어 None 으로 온다
+        rate_text = "신규" if rate is None else f"{rate:+.1f}%"
+        vals = [gubun, name, f"{prev:.4f}", f"{curr:.4f}", rate_text]
         row_cells = table.rows[row_idx + 1].cells
         bg = "D6E4F0" if row_idx % 2 == 0 else "FFFFFF"
         for i, v in enumerate(vals):

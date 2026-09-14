@@ -39,7 +39,16 @@ from report_app import chart_generator as cg
 from report_app import data_loader as dl
 from report_app import gpt_reporter as gpt
 from report_app import report_builder as rb
-from report_app.config import NATIONAL_CSV, REGIONAL_CSV, REPORT_DIR, UNIVERSITY, IS_CLOUD, COMPARE_GROUP, COMPARE_GROUP_NAME
+from report_app.config import (
+    NATIONAL_CSV,
+    REGIONAL_CSV,
+    REGIONAL_CSV_LEGACY,
+    REPORT_DIR,
+    UNIVERSITY,
+    IS_CLOUD,
+    COMPARE_GROUP,
+    COMPARE_GROUP_NAME,
+)
 
 # 컴포넌트 import
 from report_app.components.metric_card import render_metric_cards
@@ -91,8 +100,148 @@ def _target_univ() -> str:
 
 
 def _target_region() -> str:
-    """현재 분석 대상 권역명을 반환한다. 미설정 시 '충청권' 기본값."""
+    """현재 분석 대상 권역명(화면 라벨용)을 반환한다. 미설정 시 '충청권' 기본값.
+
+    통계 계산은 ``_resolve_target_region()`` 이 확정한 값을 쓴다. 그쪽이
+    세션에 권역을 기록하므로, ``_calc_stats()`` 가 한 번이라도 돌고 나면
+    이 함수와 계산이 같은 권역을 가리킨다.
+    """
     return st.session_state.get("_target_region", "충청권")
+
+
+#: 리셋 시 이 값으로 되돌릴 키.
+_RESET_DEFAULTS = {
+    "step": 1,
+    "max_step": 1,
+    "national_df": None,
+    "regional_df": None,
+    "selected_year": None,
+    "hoseo_trend": None,
+    "averages": None,
+    "rank_changes": None,
+    "yoy_changes": None,
+    "compare_data": None,
+    "charts": {},
+    "narrative_trend": "",
+    "narrative_comparison": "",
+    "narrative_regional": "",
+    "narrative_yoy": "",
+    "report_buf": None,
+    "data_source": None,
+    "data_loaded": False,
+}
+
+#: 리셋 시 **삭제**할 키.
+#: None 을 대입하면 `"key" not in session_state` 가드가 통과해 버려
+#: 다음 렌더에서 None 을 인덱싱하다 TypeError 가 난다(V05).
+#: 따라서 값 대입이 아니라 키 자체를 없앤다.
+_RESET_DELETE_KEYS = (
+    "_raw_national_df",
+    "_raw_regional_df",
+    "_filter_years",
+    "_filter_compare",
+    "_filter_selected_univs",
+    "_filter_compare_group",
+    "_custom_compare_group",
+    "_target_university",
+    "_target_region",
+    "_saved_narrative_trend",
+    "_saved_narrative_comparison",
+    "_saved_narrative_regional",
+    "_saved_narrative_yoy",
+    "_chart_dialog_title",
+    "_chart_dialog_buf",
+    "_chart_dialog_df",
+)
+
+
+def reset_analysis_state():
+    """분석 상태를 한 곳에서 초기화한다.
+
+    이전에는 리셋 경로가 3개(사이드바 / 5단계 버튼 / 데이터 재로드)였고
+    각자 다른 키 집합을 건드려 다음 문제가 동시에 발생했다.
+
+    - 사이드바 리셋이 홈 이동만 하고 아무것도 지우지 않음
+    - 5단계 리셋이 원본 프레임을 삭제 대신 None 대입 -> 1단계 복귀 시 TypeError
+    - 어느 경로도 ``max_step`` 을 되돌리지 않아 2~5단계가 계속 클릭 가능
+    - 이전 회차의 GPT 서술이 새 보고서에 섞여 들어감
+
+    이 함수가 유일한 리셋 경로다. 새 상태 키를 추가하면 위 두 목록에도 넣어야 한다.
+    ``api_key`` 는 사용자 자산이므로 건드리지 않는다.
+    """
+    for key, value in _RESET_DEFAULTS.items():
+        st.session_state[key] = dict(value) if isinstance(value, dict) else value
+    for key in _RESET_DELETE_KEYS:
+        st.session_state.pop(key, None)
+
+
+def clear_derived_state():
+    """데이터를 새로 로드할 때 이전 데이터셋에서 파생된 것만 지운다.
+
+    원본 프레임·필터·차트·서술은 A 데이터셋 기준으로 계산된 값이므로
+    B 를 로드하면 무효다. ``step``/``max_step`` 은 건드리지 않는다.
+    """
+    for key in ("charts",):
+        st.session_state[key] = {}
+    for key in ("hoseo_trend", "averages", "rank_changes", "yoy_changes",
+                "compare_data", "report_buf"):
+        st.session_state[key] = None
+    for key in _NARRATIVE_KEYS:
+        st.session_state[key] = ""
+    for key in _RESET_DELETE_KEYS:
+        st.session_state.pop(key, None)
+
+
+def _yoy_rate_text(entry) -> str | None:
+    """증감률을 화면 문자열로 만든다.
+
+    ``data_loader.get_yoy_changes`` 는 이전값이 0 이고 현재값이 0 보다 크면
+    증감률을 정의할 수 없어 ``None`` 을 돌려준다(신규 실적). 예전처럼
+    ``f"{rate:+.1f}%"`` 를 그대로 쓰면 TypeError 가 난다.
+
+    Args:
+        entry: ``{"증감률": float | None, ...}`` 또는 None
+
+    Returns:
+        "+3.2%" 형태의 문자열, 신규 실적이면 "신규", 데이터가 없으면 None.
+    """
+    if not entry:
+        return None
+    rate = entry.get("증감률")
+    if rate is None:
+        return "신규"
+    return f"{rate:+.1f}%"
+
+
+def _yoy_rate_direction(entry) -> str | None:
+    """증감률의 방향(up/down)을 돌려준다. 신규 실적은 방향을 붙이지 않는다."""
+    if not entry:
+        return None
+    rate = entry.get("증감률")
+    if rate is None or rate == 0:
+        return None
+    return "up" if rate > 0 else "down"
+
+
+def _rank_delta_type(val):
+    """순위 변화 값에 대응하는 화면 delta_type 을 돌려준다.
+
+    ``data_loader.get_rank_changes`` 의 규약은 **변화량 = 이전순위 - 현재순위**
+    이고 **양수가 개선**이다(예: 20위 -> 15위면 +5).
+
+    이전 구현은 "순위는 작을수록 좋으니 부호를 반전한다" 는 전제로
+    ``val < 0`` 을 개선으로 봤는데, data_loader 가 이미 반전해 넘기므로
+    이중 반전이 되어 개선이 빨간 하락 화살표로 표시됐다.
+
+    Args:
+        val: 순위 변화량. 양수면 개선, 음수면 악화, 0/None 이면 변화 없음.
+
+    Returns:
+        "up"(개선) / "down"(악화) / None(표시 안 함)
+    """
+    if val is None or val == 0:
+        return None
+    return "up" if val > 0 else "down"
 
 
 def _go(step: int):
@@ -102,12 +251,19 @@ def _go(step: int):
     삭제하므로, 4단계 text_area 값을 _saved_ 접두사 키에 백업해야 한다.
     4단계로 돌아올 때는 백업된 값을 위젯 키에 복원한다.
 
+    백업은 **현재 단계가 4일 때만** 한다. 4단계를 벗어난 뒤의 콜백에서는
+    위젯 키가 이미 제거돼 ``get(k, "")`` 가 빈 문자열을 돌려주므로,
+    무조건 백업하면 그 빈 문자열이 멀쩡한 백업을 덮어써 서술이 사라진다.
+
+    "빈 값이면 백업하지 않는다" 는 단축은 쓰지 않는다. 사용자가 의도적으로
+    섹션을 비운 경우를 조용히 되살려 버리기 때문이다.
+
     Args:
         step: 이동할 단계 번호 (1~5)
     """
-    for k in _NARRATIVE_KEYS:
-        val = st.session_state.get(k, "")
-        st.session_state[f"_saved_{k}"] = val
+    if st.session_state.get("step") == 4:
+        for k in _NARRATIVE_KEYS:
+            st.session_state[f"_saved_{k}"] = st.session_state.get(k, "")
 
     # 4단계로 돌아올 때 저장된 값 복원 (위젯이 다시 렌더되므로 key에 재설정)
     if step == 4:
@@ -117,6 +273,116 @@ def _go(step: int):
                 st.session_state[k] = saved
 
     st.session_state.step = step
+    if step > st.session_state.get("max_step", 1):
+        st.session_state["max_step"] = step
+
+
+#: 권역에 기본 비교군이 없을 때 대신 제시할 대학 수.
+_COMPARE_FALLBACK_SIZE = 4
+
+
+def _region_top_universities(reg_region, exclude: str, limit: int = 4) -> list[str]:
+    """권역순위 상위 대학을 돌려준다(대상 대학 제외).
+
+    ``config.COMPARE_GROUP`` 이 특정 권역에 편중돼 있어 타 권역 대학을
+    분석할 때 비교군 후보가 통째로 비는 것을 메운다.
+
+    Args:
+        reg_region: 해당 권역·기준연도로 이미 걸러진 DataFrame
+        exclude: 후보에서 뺄 대학명(대상 대학)
+        limit: 최대 개수
+
+    Returns:
+        대학명 리스트. 데이터가 없으면 빈 리스트.
+    """
+    if reg_region is None or len(reg_region) == 0:
+        return []
+    frame = reg_region
+    if "권역순위" in frame.columns:
+        frame = frame.sort_values(["권역순위", "학교명"])
+    else:
+        frame = frame.sort_values("학교명")
+    names = [u for u in frame["학교명"].tolist() if u != exclude]
+    seen, out = set(), []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def load_dataframes(nat_df, reg_df, year, source: str):
+    """데이터를 세션에 싣는 유일한 경로.
+
+    4개 소스(Raw 전처리 로컬/클라우드, CSV 업로드, 기존 output 사용)가
+    각자 세션에 직접 대입하던 것을 한 곳으로 모았다. 흩어져 있을 때는
+    아래 문제가 동시에 있었다.
+
+    - 레거시 CSV(``충청권순위`` 컬럼)를 신포맷으로 변환하지 않아
+      업로드 직후 KeyError('권역순위') 가 "파일 읽기 오류" 로 오표기됐다.
+    - 이전 데이터셋의 원본 프레임/필터/차트/GPT 서술이 남아,
+      A 를 분석한 뒤 B 를 로드하면 A 의 차트와 서술이 새 보고서에 들어갔다.
+
+    Args:
+        nat_df: 전국 데이터 DataFrame
+        reg_df: 권역 데이터 DataFrame (레거시 포맷도 허용)
+        year: 기준 연도
+        source: 데이터 출처 식별자 ("raw" / "csv" / "existing")
+    """
+    # 이전 데이터셋에서 파생된 상태를 먼저 비운다.
+    clear_derived_state()
+
+    # 레거시 포맷(충청권순위)을 신포맷(권역명/권역순위)으로 정규화한다.
+    nat_df, reg_df = dl._ensure_new_format(nat_df), dl._ensure_new_format(reg_df)
+
+    st.session_state.national_df = nat_df
+    st.session_state.regional_df = reg_df
+    st.session_state.selected_year = year
+    st.session_state["data_source"] = source
+    _calc_stats()
+    st.session_state["data_loaded"] = True
+
+
+def _resolve_target_region(reg_df, university=None) -> str:
+    """통계 계산에 쓸 권역명을 확정한다.
+
+    필터 화면을 거치지 않는 소스(CSV 업로드, 기존 output 사용)는
+    ``_target_region`` 을 설정하지 않은 채 2단계로 직행한다. 그러면
+    ``region_name=None`` 이 data_loader 로 흘러가 '권역평균' 이 전국 전체
+    평균으로 계산되는데, 화면 라벨과 보고서 제목은 ``_target_region()`` 의
+    기본값 '충청권' 을 쓴다. 즉 **표시하는 권역과 계산하는 권역이 달랐다.**
+
+    여기서 대상 대학의 권역을 자동 감지해 세션에 확정함으로써
+    계산과 라벨이 항상 같은 권역을 가리키게 한다.
+
+    Args:
+        reg_df: 권역 데이터 DataFrame (None 가능)
+        university: 대상 대학명. None 이면 현재 대상 대학을 쓴다.
+
+    Returns:
+        확정된 권역명. 감지에 실패하면 화면 라벨과 같은 기본값을 돌려준다.
+    """
+    region = st.session_state.get("_target_region")
+    if region:
+        return region
+    if reg_df is None:
+        return None
+    univ = university or _target_univ()
+    try:
+        detected = dl.detect_region(univ, reg_df)
+    except Exception:  # noqa: BLE001 - 레거시 프레임 등 어떤 이유로든 감지 실패 시
+        detected = []
+    if detected:
+        region = sorted(detected)[0]
+        st.session_state["_target_region"] = region
+        return region
+
+    # 감지 실패 시 None 을 넘기면 data_loader 가 전국 전체를 '권역' 으로
+    # 계산하는데 화면은 여전히 _target_region() 의 기본값을 표시한다.
+    # 그 불일치보다는 라벨과 같은 권역으로 계산하는 편이 낫다.
+    return _target_region()
 
 
 def _calc_stats():
@@ -136,7 +402,7 @@ def _calc_stats():
     year = st.session_state.selected_year
     cmp = st.session_state.get("_custom_compare_group", None)
     univ = st.session_state.get("_target_university", None)
-    region = st.session_state.get("_target_region", None)
+    region = _resolve_target_region(reg, univ)
     st.session_state.hoseo_trend = dl.get_hoseo_trend(nat, reg, university=univ, region_name=region)
     st.session_state.averages = dl.get_averages(nat, reg, compare_group=cmp, region_name=region)
     st.session_state.rank_changes = dl.get_rank_changes(nat, reg, university=univ, region_name=region)
@@ -317,8 +583,12 @@ def _render_data_filter():
         return
 
     # 원본 DataFrame 보관 (필터 변경 시 원본에서 다시 필터링)
-    if "_raw_national_df" not in st.session_state:
+    # 주의: `not in` 이 아니라 `is None` 으로 확인한다. 과거 리셋 구현이
+    # 키를 삭제하지 않고 None 을 대입해, 키는 있는데 값이 None 인 상태에서
+    # 아래 인덱싱이 TypeError 를 냈다.
+    if st.session_state.get("_raw_national_df") is None:
         st.session_state["_raw_national_df"] = nat_df.copy()
+    if st.session_state.get("_raw_regional_df") is None:
         st.session_state["_raw_regional_df"] = reg_df.copy()
 
     # 필터링은 항상 원본 기준으로 수행
@@ -388,6 +658,12 @@ def _render_data_filter():
         help="이 대학을 기준으로 추이, 순위, 비교 분석을 수행합니다. 대학명 일부를 입력하면 검색됩니다.",
     )
 
+    # 대상 대학이 바뀌면 이전 대학 기준으로 확정된 권역은 무효다.
+    # _calc_stats() 가 _target_region 을 세션에 캐시하므로, 이 무효화가 없으면
+    # 이전 대학의 권역이 새 대학의 기본 선택으로 새어 들어간다.
+    if target_university != st.session_state.get("_target_university"):
+        st.session_state.pop("_target_region", None)
+
     # ── 1.6. 권역 자동 감지 ────────────────────────────────────────────────
     detected_regions = dl.detect_region(target_university, reg_df)
 
@@ -413,8 +689,13 @@ def _render_data_filter():
 
     # ── 2. 권역 대학 직접 선택 (체크박스 테이블) ──────────────────────────
     st.markdown("---")
-    st.markdown(f"**{target_region} 대학 선택** — 분석에 포함할 대학을 체크하세요")
-    st.caption(f"✅ {target_university}는 분석 대상이므로 항상 포함됩니다.")
+    st.markdown(f"**{target_region} 대학 선택** — 비교군 후보로 쓸 대학을 체크하세요")
+    st.caption(
+        f"✅ {target_university}는 분석 대상이므로 항상 포함됩니다. "
+        f"체크는 아래 비교군 후보와 미리보기 표에만 영향을 줍니다 — "
+        f"{target_region}평균·{target_region}순위·증감 상하위는 체크와 무관하게 "
+        f"{target_region} 전체 대학을 기준으로 계산됩니다."
+    )
 
     # 기준 연도 + 해당 권역 데이터로 대학 목록 생성
     reg_region = reg_df
@@ -455,7 +736,10 @@ def _render_data_filter():
         column_config={
             "선택": st.column_config.CheckboxColumn(
                 "선택",
-                help="분석에 포함할 대학을 체크하세요",
+                help=(
+                    "비교군 후보로 쓸 대학을 체크하세요. "
+                    "권역평균·권역순위는 체크와 무관하게 권역 전체 기준입니다."
+                ),
                 default=False,
                 width="small",
             ),
@@ -486,7 +770,25 @@ def _render_data_filter():
     st.caption("비교군은 평균 계산, 비교 차트에 사용됩니다.")
 
     compare_candidates = [u for u in selected_univs if u != target_university]
+
+    # config.COMPARE_GROUP 5개교는 전부 충청권이다. 대상 대학이 다른 권역이면
+    # 기본 체크가 하나도 걸리지 않아 후보가 비고, 비교군이 대상 대학 자기 자신
+    # 하나만 남아 '비교군평균' 이 대상 대학의 값과 같아진다. 경고조차 없었다.
+    # 권역에 기본 비교군이 없으면 권역순위 상위 대학으로 후보를 채운다.
+    if not compare_candidates:
+        fallback = _region_top_universities(
+            reg_region, target_university, limit=_COMPARE_FALLBACK_SIZE
+        )
+        compare_candidates = fallback
+        if fallback:
+            st.info(
+                f"ℹ️ {COMPARE_GROUP_NAME}은 {target_region} 대학이 아닙니다. "
+                f"{target_region} 권역순위 상위 {len(fallback)}개교를 비교군 후보로 제시합니다."
+            )
+
     default_compare = [u for u in COMPARE_GROUP if u != target_university and u in compare_candidates]
+    if not default_compare:
+        default_compare = compare_candidates[:_COMPARE_FALLBACK_SIZE]
     prev_compare = st.session_state.get("_filter_compare", default_compare)
     prev_compare = [u for u in prev_compare if u in compare_candidates] or default_compare
 
@@ -498,6 +800,11 @@ def _render_data_filter():
         help=f"{target_university}는 자동 포함. 직접 비교할 대학을 선택하세요.",
     )
     compare_group_final = list(set([target_university] + selected_compare))
+    if len(compare_group_final) < 2:
+        st.warning(
+            f"⚠️ 비교군에 {target_university} 외의 대학이 없습니다. "
+            "이 상태로 진행하면 '비교군 평균' 이 대상 대학 자기 값과 같아집니다."
+        )
 
     # ── 4. 필터 요약 + 미리보기 ────────────────────────────────────────────
     st.markdown("---")
@@ -507,24 +814,34 @@ def _render_data_filter():
     col_s3.metric(f"{target_region} 대학", f"{selected_count}개교")
     col_s4.metric("비교군", f"{len(compare_group_final)}개교")
 
-    # 연도 + 대학 필터 적용된 DataFrame
+    # 연도 필터 적용된 전국 DataFrame (전국평균 모집단을 유지하기 위해 대학 필터 없음)
     filtered_nat = nat_df[nat_df["연도"].isin(selected_years)]
-    # 권역 데이터: 해당 권역 + 선택된 대학만 필터
-    reg_mask = reg_df["연도"].isin(selected_years) & reg_df["학교명"].isin(selected_univs)
+
+    # 권역 데이터: **연도 + 권역까지만** 필터한다.
+    # 여기에 체크된 대학까지 걸면 '권역평균' 의 모집단이 비교군과 같아져
+    # 두 수치가 완전히 같아지고, 전국평균만 전체를 유지해 모집단이 비대칭이 된다.
+    # 체크 목록은 비교군 후보 선정에만 쓰고 통계 모집단은 건드리지 않는다.
+    reg_mask = reg_df["연도"].isin(selected_years)
     if "권역명" in reg_df.columns:
         reg_mask = reg_mask & (reg_df["권역명"] == target_region)
     filtered_reg = reg_df[reg_mask]
 
+    # 미리보기용 — 사용자가 체크한 대학만 보여 준다(통계에는 쓰지 않는다).
+    preview_reg = filtered_reg[filtered_reg["학교명"].isin(selected_univs)]
+
     with st.expander("📋 필터링된 데이터 미리보기", expanded=False):
         tab_reg, tab_nat = st.tabs([f"{target_region} 데이터 (필터 적용)", "전국 데이터"])
         with tab_reg:
-            sort_col_preview = "권역순위" if "권역순위" in filtered_reg.columns else "학교명"
+            sort_col_preview = "권역순위" if "권역순위" in preview_reg.columns else "학교명"
             st.dataframe(
-                filtered_reg.sort_values(["연도", sort_col_preview]),
+                preview_reg.sort_values(["연도", sort_col_preview]),
                 use_container_width=True,
                 hide_index=True,
             )
-            st.caption(f"총 {len(filtered_reg)}행 — {selected_count}개 대학 × {len(selected_years)}개 연도")
+            st.caption(
+                f"총 {len(preview_reg)}행 — {selected_count}개 대학 × {len(selected_years)}개 연도. "
+                f"권역 평균은 {target_region} 전체 {filtered_reg['학교명'].nunique()}개교 기준으로 계산됩니다."
+            )
         with tab_nat:
             st.dataframe(
                 filtered_nat.sort_values(["연도", "전국순위"]).head(50),
@@ -622,12 +939,8 @@ def _render_source_raw():
                         uploaded_dict = {f.name: f.getvalue() for f in uploaded_raws}
                         nat_df, reg_df = mod.process_in_memory(uploaded_dict)
 
-                    st.session_state.national_df = nat_df
-                    st.session_state.regional_df = reg_df
                     years = sorted(nat_df["연도"].unique().tolist(), reverse=True)
-                    st.session_state.selected_year = years[0]
-                    _calc_stats()
-                    st.session_state["data_loaded"] = True
+                    load_dataframes(nat_df, reg_df, years[0], "raw")
                     st.success("✅ 전처리 완료! (클라우드 모드)")
                     st.rerun()
 
@@ -662,11 +975,7 @@ def _render_source_raw():
                     if NATIONAL_CSV.exists() and REGIONAL_CSV.exists():
                         nat_df, reg_df = dl.load_all_data()
                         years = sorted(nat_df["연도"].unique().tolist(), reverse=True)
-                        st.session_state.national_df = nat_df
-                        st.session_state.regional_df = reg_df
-                        st.session_state.selected_year = years[0]
-                        _calc_stats()
-                        st.session_state["data_loaded"] = True
+                        load_dataframes(nat_df, reg_df, years[0], "raw")
                         st.success(f"📊 데이터 자동 로드 완료 — {years}년 데이터 준비됨")
                         if st.button("▶ 2단계 통계 확인으로 이동", type="primary"):
                             _go(2)
@@ -720,11 +1029,7 @@ def _render_source_csv():
             selected = st.selectbox("기준 연도 선택", years, key="year_sel_upload")
 
             if st.button("✅ 이 데이터로 분석 시작", type="primary", use_container_width=True):
-                st.session_state.national_df = nat_df
-                st.session_state.regional_df = reg_df
-                st.session_state.selected_year = selected
-                _calc_stats()
-                st.session_state["data_loaded"] = True
+                load_dataframes(nat_df, reg_df, selected, "csv")
                 _go(2)
                 st.rerun()
         except Exception as e:
@@ -742,11 +1047,14 @@ def _render_source_existing():
         IS_CLOUD가 True이면 이 함수가 호출되지 않는다 (카드 비활성화).
     """
     nat_exists = NATIONAL_CSV.exists()
-    reg_exists = REGIONAL_CSV.exists()
+    # 신형이 없어도 레거시(충청권_순위.csv)가 있으면 load_all_data 가 변환해 준다.
+    # 여기서 신형만 확인하면 레거시만 설치된 번들에서 있는 파일을 없다고 표시한다.
+    reg_exists = REGIONAL_CSV.exists() or REGIONAL_CSV_LEGACY.exists()
 
     if nat_exists and reg_exists:
-        nat_df_ex = pd.read_csv(NATIONAL_CSV, encoding="utf-8-sig")
-        reg_df_ex = pd.read_csv(REGIONAL_CSV, encoding="utf-8-sig")
+        # pd.read_csv 를 직접 부르면 _ensure_new_format 과 레거시 폴백을 모두
+        # 우회한다. 로드 경로는 load_all_data 하나로 통일한다.
+        nat_df_ex, reg_df_ex = dl.load_all_data()
         years_ex = sorted(nat_df_ex["연도"].unique().tolist(), reverse=True)
 
         st.success(f"✅ output/ 폴더 파일 확인됨 — **{years_ex}**년 데이터")
@@ -762,11 +1070,7 @@ def _render_source_existing():
         selected_ex = st.selectbox("기준 연도 선택", years_ex, key="year_sel_existing")
 
         if st.button("✅ 기존 파일로 분석 시작", type="primary", use_container_width=True):
-            st.session_state.national_df = nat_df_ex
-            st.session_state.regional_df = reg_df_ex
-            st.session_state.selected_year = selected_ex
-            _calc_stats()
-            st.session_state["data_loaded"] = True
+            load_dataframes(nat_df_ex, reg_df_ex, selected_ex, "existing")
             _go(2)
             st.rerun()
     else:
@@ -774,7 +1078,7 @@ def _render_source_existing():
         if not nat_exists:
             missing.append("전체_대학_데이터.csv")
         if not reg_exists:
-            missing.append("충청권_순위.csv")
+            missing.append(f"{REGIONAL_CSV.name}(또는 {REGIONAL_CSV_LEGACY.name})")
         st.warning(f"⚠️ output/ 폴더에 파일 없음: {', '.join(missing)}")
         st.info("🔧 Raw Excel 전처리 소스에서 전처리를 먼저 실행하세요.")
 
@@ -821,25 +1125,13 @@ def _render_step2():
         d = hoseo[year]
         rc = ranks.get(year, {})
 
-        # 순위 delta_type: 순위는 숫자가 작을수록 좋으므로
-        # 음수 변화(순위 올라감) → "up", 양수 변화(순위 내려감) → "down"
-        def _rank_delta_type(val):
-            """순위 변화 값에 따른 delta_type을 결정한다. 순위는 inverse이므로 부호 반전."""
-            if val is None or val == 0:
-                return None
-            return "up" if val < 0 else "down"
-
         _region = _target_region()
         metrics = [
             {
                 "label": "1인당 논문수",
                 "value": f"{d['1인당논문수']:.4f}",
-                "delta": f"{yoy['호서']['증감률']:+.1f}%" if yoy.get("호서") else None,
-                "delta_type": (
-                    "up" if yoy.get("호서") and yoy["호서"]["증감률"] > 0
-                    else "down" if yoy.get("호서") and yoy["호서"]["증감률"] < 0
-                    else None
-                ),
+                "delta": _yoy_rate_text(yoy.get("호서")),
+                "delta_type": _yoy_rate_direction(yoy.get("호서")),
                 "icon": "📝",
             },
             {
@@ -932,9 +1224,9 @@ def _render_step2():
                 )
             if yoy.get("호서"):
                 st.info(
-                    f"**{_target_univ()}**: {yoy['호서']['기준연도']:.4f} → "
-                    f"{yoy['호서']['비교연도']:.4f}  "
-                    f"증감률 **{yoy['호서']['증감률']:+.1f}%**"
+                    f"**{_target_univ()}**: {yoy['호서']['비교연도']:.4f} → "
+                    f"{yoy['호서']['기준연도']:.4f}  "
+                    f"증감률 **{_yoy_rate_text(yoy['호서']) or '신규'}**"
                 )
         else:
             st.info("전년도 데이터 없음")
@@ -1379,32 +1671,7 @@ def _render_step5():
     col_prev, _, col_restart = st.columns([1, 3, 1])
     col_prev.button("← 4단계로", on_click=_go, args=(4,), use_container_width=True)
     if col_restart.button("🔄 처음부터", use_container_width=True):
-        # 기본값으로 초기화 — step, 데이터, 차트, 서술 모두 리셋
-        reset_keys = {
-            "step": 1,
-            "national_df": None,
-            "regional_df": None,
-            "selected_year": None,
-            "hoseo_trend": None,
-            "averages": None,
-            "rank_changes": None,
-            "yoy_changes": None,
-            "compare_data": None,
-            "charts": {},
-            "narrative_trend": "",
-            "narrative_comparison": "",
-            "narrative_regional": "",
-            "narrative_yoy": "",
-            "report_buf": None,
-            "data_loaded": False,
-            "data_source": None,
-            "_raw_national_df": None,
-            "_raw_regional_df": None,
-            "_filter_years": None,
-            "_filter_compare": None,
-            "_custom_compare_group": None,
-            "_target_region": None,
-        }
-        for k, v in reset_keys.items():
-            st.session_state[k] = v
+        # 리셋 경로는 reset_analysis_state() 하나뿐이다. 여기서 키 목록을
+        # 따로 관리하면 사이드바 리셋과 갈라져 잔여 상태가 생긴다.
+        reset_analysis_state()
         st.rerun()

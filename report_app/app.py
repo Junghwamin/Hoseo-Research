@@ -43,7 +43,7 @@ from report_app.components.toolbar import render_toolbar
 
 # 페이지
 from report_app.pages.home import render_home
-from report_app.pages.research import render_research
+from report_app.pages.research import _go, render_research, reset_analysis_state
 from report_app.pages.settings import render_settings
 
 
@@ -182,11 +182,11 @@ if st.session_state.pop("sidebar_api_change", False):
     _api_key_dialog()
 
 # 리셋 처리
+# 사이드바는 플래그를 들여다보기만 하고, 소비와 실제 리셋은 여기서 한다.
 if st.session_state.pop("sidebar_reset_clicked", False):
-    saved_key = st.session_state.api_key
-    for k, v in _DEFAULTS.items():
-        st.session_state[k] = v
-    st.session_state.api_key = saved_key
+    reset_analysis_state()
+    st.session_state.module = "home"
+    st.session_state.step = 0
     st.rerun()
 
 # 모듈 변경 처리
@@ -199,8 +199,13 @@ if selected_module != cur_module:
     st.rerun()
 
 # 단계 변경 처리
+# research 모듈에서는 _go() 를 거친다. 직접 대입하면 4단계 text_area 의
+# GPT 서술이 백업되지 않아 사이드바로 이동할 때마다 사라진다.
 if selected_step is not None and selected_step != cur_step:
-    st.session_state.step = selected_step
+    if st.session_state.get("module") == "research":
+        _go(selected_step)
+    else:
+        st.session_state.step = selected_step
     st.rerun()
 
 
@@ -241,10 +246,12 @@ if current_module == "home":
         st.rerun()
 
 elif current_module == "research":
-    render_research(st.session_state.step)
-    # max_step 업데이트: 현재 단계가 max_step보다 크면 갱신
+    # max_step 갱신을 render 앞에 둔다. 뒤에 두면 4단계의 API 키 게이트가
+    # st.stop() 으로 스크립트를 끊을 때 갱신이 통째로 건너뛰어져
+    # step=4 인데 max_step=1 이 되고, 사이드바로 되돌아올 수 없게 된다.
     if st.session_state.step > st.session_state.get("max_step", 1):
         st.session_state.max_step = st.session_state.step
+    render_research(st.session_state.step)
 
 elif current_module == "settings":
     render_settings()

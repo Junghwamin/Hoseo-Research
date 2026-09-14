@@ -200,7 +200,11 @@ def render_sidebar(
             unsafe_allow_html=True,
         )
         _render_footer()
-        if st.session_state.pop("sidebar_reset_clicked", False):
+        # 플래그를 소비하지 않고 들여다보기만 한다.
+        # 여기서 pop 하면 같은 run 안에서 app.py 의 리셋 블록이 항상 False 를
+        # 받아 죽은 코드가 된다(리셋 버튼이 홈 이동만 하던 원인).
+        # 소비는 app.py 가 한다.
+        if st.session_state.get("sidebar_reset_clicked", False):
             selected_module = "home"
             selected_step = None
 

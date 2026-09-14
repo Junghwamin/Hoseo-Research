@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from report_app.config import (
@@ -228,6 +230,12 @@ def get_rank_changes(
     """
     대상 대학의 연도별 권역·전국 순위 및 전년대비 변화를 반환한다.
 
+    부호 규약(중요):
+        변화량 = 이전순위 - 현재순위
+        → **양수 = 순위 개선**(예: 7위에서 5위로 오르면 +2)
+        → **음수 = 순위 하락**, 0 = 동일, None = 비교할 이전 연도가 없음
+        화면·보고서에서 이 값을 다시 뒤집지 말 것.
+
     Returns:
         {연도: {"권역순위", "전국순위", "권역순위_변화", "전국순위_변화"}, ...}
     """
@@ -270,6 +278,30 @@ def get_rank_changes(
 # 6. 전년대비 증감률 상위·하위 대학 (권역 기준)
 # ---------------------------------------------------------------------------
 
+def _yoy_rate(current: float, previous: float) -> float | None:
+    """전년대비 증감률(%)을 계산한다.
+
+    이전값이 0 이면 증감률을 정의할 수 없으므로 두 경우를 구분한다:
+        - 이전 0 · 현재 > 0  → None ('신규' 실적. 무변화와 혼동되면 안 된다)
+        - 이전 0 · 현재 = 0  → 0.0 (무실적 유지)
+
+    **NaN 은 절대 반환하지 않는다.** 소비처의 가드가 `is None` 으로만 걸러지므로
+    NaN 이 새어 나가면 f"{v:+.1f}%" 가 예외 없이 '+nan%' 로 조용히 렌더된다.
+    결측·비정상 입력(업로드 CSV 에 NaN/inf 가 섞인 경우)도 None 으로 모은다.
+    """
+    if not (math.isfinite(current) and math.isfinite(previous)):
+        return None
+    if previous > 0:
+        rate = round((current - previous) / previous * 100, 1)
+        return rate if math.isfinite(rate) else None
+    return None if current > 0 else 0.0
+
+
+def _yoy_sort_key(rate: float | None) -> float:
+    """정렬용 키. 신규 실적(None)은 최대 증가로 보아 맨 앞에 둔다."""
+    return float("inf") if rate is None else rate
+
+
 def get_yoy_changes(
     regional_df: pd.DataFrame,
     year: int,
@@ -278,7 +310,27 @@ def get_yoy_changes(
 ) -> dict:
     """
     권역 내 대학의 전년대비 1인당논문수 증감률을 계산하여
-    상위 3개 / 하위 3개 대학을 반환한다.
+    증가 상위 / 감소 하위 대학을 반환한다.
+
+    상위·하위는 **서로 겹치지 않는다**. 대상 대학 수가 적으면 개수를 줄여
+    나눠 갖는다(상위 최대 3 = min(3, (n+1)//2), 하위 = min(3, n - 상위 수)).
+    따라서 1개교뿐인 권역은 상위 1 / 하위 0 이 된다.
+
+    다중 캠퍼스로 2개 권역에 등재된 대학은 (학교명, 권역명) 기준으로 합친 뒤
+    학교명 기준으로 한 번만 남긴다(region_name=None 이어도 중복 등장하지 않는다).
+
+    증감률 타입 계약 (float | None 뿐이며 **NaN 은 반환하지 않는다**):
+        float  — 이전값 > 0 인 일반적인 경우 (소수 첫째 자리 반올림)
+        0.0    — 이전 0 · 현재 0 (무실적 유지)
+        None   — 이전 0 · 현재 > 0 (**신규 실적**) 또는 값이 결측이라
+                 증감률을 정의할 수 없는 경우. 소비처는 '신규' 등으로
+                 표기해야 하며 그대로 숫자 포맷(f"{v:+.1f}%")에 넣으면 안 된다.
+                 NaN 을 내보내면 소비처의 `is None` 가드를 통과해
+                 '+nan%' 로 조용히 렌더되므로 None 으로만 신호한다.
+
+    Returns:
+        {"상위": [...], "하위": [...], "호서": {...} | None}
+        각 원소 키: {"학교명", "증감률", "기준연도"(현재값), "비교연도"(이전값)}
     """
     univ = university or UNIVERSITY
     prev_year = year - 1
@@ -288,38 +340,44 @@ def get_yoy_changes(
     if region_name and "권역명" in regional_df.columns:
         reg_data = regional_df[regional_df["권역명"] == region_name]
 
-    cur = reg_data[reg_data["연도"] == year][["학교명", "1인당논문수"]].copy()
-    prv = reg_data[reg_data["연도"] == prev_year][["학교명", "1인당논문수"]].copy()
+    # 다중권역 대학이 cross-product 로 불어나지 않도록 권역명까지 병합 키로 쓴다.
+    merge_keys = ["학교명"]
+    if "권역명" in reg_data.columns:
+        merge_keys.append("권역명")
+    cols = merge_keys + ["1인당논문수"]
+
+    cur = reg_data[reg_data["연도"] == year][cols].copy()
+    prv = reg_data[reg_data["연도"] == prev_year][cols].copy()
 
     if cur.empty or prv.empty:
         return {"상위": [], "하위": [], "호서": None}
 
-    merged = cur.merge(prv, on="학교명", suffixes=("_현재", "_이전"))
-    merged["증감률"] = merged.apply(
-        lambda r: round(
-            (r["1인당논문수_현재"] - r["1인당논문수_이전"]) / r["1인당논문수_이전"] * 100, 1
-        )
-        if r["1인당논문수_이전"] > 0
-        else 0.0,
-        axis=1,
-    )
-    merged = merged.sort_values("증감률", ascending=False).reset_index(drop=True)
+    merged = cur.merge(prv, on=merge_keys, suffixes=("_현재", "_이전"))
+    # 권역마다 한 행씩 남은 다중권역 대학을 학교명 기준 1행으로 줄인다.
+    merged = merged.drop_duplicates(subset=["학교명"], keep="first")
 
-    def _row_to_dict(r) -> dict:
-        return {
+    rows: list[dict] = []
+    for _, r in merged.iterrows():
+        current = float(r["1인당논문수_현재"])
+        previous = float(r["1인당논문수_이전"])
+        rows.append({
             "학교명": r["학교명"],
-            "증감률": r["증감률"],
-            "기준연도": round(float(r["1인당논문수_현재"]), 4),
-            "비교연도": round(float(r["1인당논문수_이전"]), 4),
-        }
+            "증감률": _yoy_rate(current, previous),
+            "기준연도": round(current, 4),
+            "비교연도": round(previous, 4),
+        })
 
-    top3 = [_row_to_dict(r) for _, r in merged.head(3).iterrows()]
-    bot3 = [_row_to_dict(r) for _, r in merged.tail(3).iterrows()]
+    rows.sort(key=lambda row: _yoy_sort_key(row["증감률"]), reverse=True)
 
-    hoseo_rows = merged[merged["학교명"] == univ]
-    hoseo = _row_to_dict(hoseo_rows.iloc[0]) if not hoseo_rows.empty else None
+    # 상위·하위가 같은 대학을 공유하지 않도록 겹치지 않게 잘라 쓴다.
+    top_n = min(3, (len(rows) + 1) // 2)
+    bottom_n = min(3, len(rows) - top_n)
+    top = [dict(row) for row in rows[:top_n]]
+    bottom = [dict(row) for row in rows[len(rows) - bottom_n:]] if bottom_n else []
 
-    return {"상위": top3, "하위": bot3, "호서": hoseo}
+    hoseo = next((dict(row) for row in rows if row["학교명"] == univ), None)
+
+    return {"상위": top, "하위": bottom, "호서": hoseo}
 
 
 # ---------------------------------------------------------------------------

@@ -173,7 +173,12 @@ def create_comparison_bar(
         university: 강조 표시할 대학명. None이면 config.UNIVERSITY 사용
     """
     univ = university or UNIVERSITY
-    df_year = regional_df[regional_df["연도"] == year].sort_values("1인당논문수", ascending=False)
+    df_year = regional_df[regional_df["연도"] == year]
+    # 권역명 컴런이 있는 신규 포맷이면 해당 권역으로도 걷러낸다
+    # (권역명이 없는 레거시 프레임은 이미 단일 권역이므로 그대로 둔다)
+    if region_name and "권역명" in df_year.columns:
+        df_year = df_year[df_year["권역명"] == region_name]
+    df_year = df_year.sort_values("1인당논문수", ascending=False)
 
     names = df_year["학교명"].tolist()
     values = df_year["1인당논문수"].tolist()
