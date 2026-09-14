@@ -123,13 +123,27 @@ def test_full_pipeline_hoseo_chungcheong(real_frames):
     national_df, regional_df = real_frames
     university, region_name = "호서대학교", "충청권"
 
-    assert national_df.shape == (1308, 6), "샌드박스 전국 CSV 규모"
-    assert regional_df.shape == (1368, 8), "샌드박스 권역 CSV 규모"
+    # 행 수를 리터럴로 박지 않는다. 새 연도 데이터가 들어오면 늘어나는 것이
+    # 정상이고, 이 테스트의 목적은 규모 기록이 아니라 파이프라인 관통이다.
+    # 데이터 규모 기록은 INF-01 의 @characterization 쪽이 담당한다.
+    assert national_df.shape[1] == 6, "전국 CSV 컬럼 수"
+    assert regional_df.shape[1] == 8, "권역 CSV 컬럼 수"
+    assert national_df.shape[0] >= 1000, "전국 CSV 가 비정상적으로 작다"
+    assert regional_df.shape[0] >= national_df.shape[0], (
+        "권역 CSV 는 다중캠퍼스 대학 때문에 전국 CSV 보다 행이 많거나 같아야 한다"
+    )
 
     stats = _collect_stats(national_df, regional_df, university, region_name, BASE_YEAR)
 
     # --- 통계 계층 ---
-    assert sorted(stats["trend"].keys()) == list(range(2016, 2026))
+    data_years = sorted(int(y) for y in national_df["연도"].unique())
+    assert sorted(stats["trend"].keys()) == data_years, (
+        "추이 딕셔너리가 CSV 의 연도를 그대로 담아야 한다"
+    )
+    assert BASE_YEAR in data_years, (
+        f"기준 연도 {BASE_YEAR} 가 데이터에 없다 — 이 테스트의 고정 단언들이 "
+        f"그 해 값을 근거로 하므로 BASE_YEAR 는 의도적으로 고정해 둔다"
+    )
     current = stats["trend"][BASE_YEAR]
     assert current["전임교원수"] == 432
     assert current["1인당논문수"] == pytest.approx(0.1182, abs=1e-4)
@@ -164,8 +178,8 @@ def test_full_pipeline_hoseo_chungcheong(real_frames):
     assert f"기준 연도: {BASE_YEAR}년" in paragraphs
 
     assert len(doc.tables) == 3, "연도별 추이 / 비교군 / 전년대비 증감 3개 표"
-    assert [len(t.rows) for t in doc.tables] == [11, 6, 7], (
-        "표 행 수: 헤더+10개년, 헤더+비교군 5개교, 헤더+상위 3+하위 3"
+    assert [len(t.rows) for t in doc.tables] == [1 + len(data_years), 6, 7], (
+        "표 행 수: 헤더+데이터 연도 수, 헤더+비교군 5개교, 헤더+상위 3+하위 3"
     )
     assert _image_count(doc) == 5, "차트 5종이 모두 서로 다른 이미지로 삽입돼야 한다"
 

@@ -405,21 +405,22 @@ def test_inf01_현재_행수와_연도별_대학수를_기록한다():
     national = _read(NATIONAL_PATH)
     regional = _read(REGIONAL_PATH)
 
-    assert national.shape == (1308, 6), "전국 CSV 행 수가 바뀌었다 (V14 수정 시 갱신)"
-    assert regional.shape == (1368, 8), "권역 CSV 행 수가 바뀌었다 (V14 수정 시 갱신)"
+    assert national.shape == (1441, 6), "전국 CSV 행 수가 바뀌었다 (연도 추가 시 갱신)"
+    assert regional.shape == (1507, 8), "권역 CSV 행 수가 바뀌었다 (연도 추가 시 갱신)"
 
     per_year = national.groupby("연도").size().to_dict()
     assert per_year == {
         2016: 128, 2017: 128, 2018: 128, 2019: 129, 2020: 129,
         2021: 130, 2022: 134, 2023: 134, 2024: 134, 2025: 134,
-    }, "연도별 대학 수가 바뀌었다 — 전국이 사립 134개교로 한정된 현재 상태의 기록이다"
+        2026: 133,
+    }, "연도별 대학 수가 바뀌었다 — 전국이 등재 사립으로 한정된 현재 상태의 기록이다"
 
     assert sorted(regional["권역명"].unique().tolist()) == [
         "강원권", "수도권", "영남권", "제주권", "충청권", "호남권",
     ]
 
     if _LEGACY_AVAILABLE:
-        assert _read(LEGACY_PATH).shape == (285, 7)
+        assert _read(LEGACY_PATH).shape == (314, 7)
 
 
 @realdata
