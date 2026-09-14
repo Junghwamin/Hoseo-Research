@@ -15,11 +15,51 @@ GPT-4o + matplotlib + python-docx를 사용하여 Word 보고서를 자동 생�
 pip install -r requirements.txt
 
 # Streamlit 앱 실행 (프로젝트 루트에서 실행 필수)
-cd "C:\Users\HOSEO\Desktop\Hoseo-IR-"
+cd "C:\Users\정화민\Desktop\Hoseo Reasearch\Hoseo-Research"
 streamlit run report_app/app.py
 ```
 
 브라우저에서 http://localhost:8501 접속.
+
+---
+
+## 테스트 (코드 수정 시 필수 준수)
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q                       # 전체 (live 마커 제외)
+```
+
+**프로덕션 코드를 고쳤으면 반드시 `pytest -q` 를 돌리고 결과를 근거로 제시한다.
+"고쳤습니다" 라는 보고만으로는 부족하다.**
+
+### 이 스위트를 다룰 때 반드시 알아야 할 것
+
+1. **`xfail_strict = true`** — 결함 잠금 테스트가 예상외로 통과하면 실행이
+   FAILED 로 떨어진다. 버그가 아니라 설계다. 어떤 수정이 의도한 범위를 넘었다는
+   신호이므로, 테스트를 고쳐서 통과시키지 말고 수정 범위를 다시 본다.
+2. **테스트를 고쳐서 green 을 만드는 것은 실패다.** 잠금 테스트는 "고쳐진 뒤의
+   올바른 동작" 을 단언한다. 지금 실패하는 것이 정상이다.
+3. **완료 기준은 `failed 0` 이 아니다.** 결함을 고치면 그 결함의
+   `@pytest.mark.characterization` 테스트는 반드시 깨진다. 올바른 기준은
+   "모든 실패가 strict XPASS 아니면 낡은 characterization 이고, 그 밖은 0건".
+4. `tests/conftest.py`, `pytest.ini`, `tests/fixtures/` 는 하네스다. 테스트를
+   통과시키려고 이 파일들을 건드리면 스위트 전체가 거짓 통과한다.
+   `tests/test_harness_guards.py` 가 이를 감시한다.
+5. `report_app/config.py` 는 import 시 `Path.cwd()` 를 **1회** 평가한다. 그래서
+   conftest 는 모듈 최상단에서 chdir 한다. 이 순서를 바꾸면 테스트가 실제
+   `output/` 을 덮어쓴다.
+
+### 알려진 함정
+
+- `streamlit` 로거는 전부 `propagate=False` 라 pytest `caplog` 으로 잡히지 않는다.
+  방출 지점 로거에 `caplog.handler` 를 직접 붙여야 한다.
+- `xfail` 에 `raises=` 가 없으면 렌더 크래시가 XFAIL 로 흡수되어 결함 잠금이
+  거짓으로 성립한다. 항상 `raises=` 를 명시한다.
+- `scripts/smoke_test.py` 는 PostToolUse **훅**이다. stdin 으로 JSON 을 받아야
+  실제로 동작하고, 그냥 실행하면 조용히 exit 0 한다(통과로 착각하기 쉽다).
+
+검증 결과와 미해결 항목은 `docs/QA_REVIEW_REPORT.md` 에 있다.
 
 ---
 
@@ -69,10 +109,23 @@ streamlit run report_app/app.py
 
 ## 데이터 구조
 
-### `output/충청권_순위.csv`
+### `output/권역별_순위.csv` (현행 포맷)
+```
+연도, 학교명, 전임교원수, SCI/SCOPUS논문수, 1인당논문수, 권역명, 권역순위, 전국순위
+```
+6개 권역(수도권·강원권·충청권·호남권·영남권·제주권) 전체를 담는다.
+다중 캠퍼스 대학은 권역마다 한 행씩 나타난다.
+
+### `output/충청권_순위.csv` (레거시, 하위 호환용)
 ```
 연도, 학교명, 전임교원수, SCI/SCOPUS논문수, 1인당논문수, 충청권순위, 전국순위
 ```
+`data_loader._ensure_new_format()` 이 읽을 때 신형으로 변환한다.
+새 코드는 권역별_순위.csv 를 쓸 것.
+
+> **전국순위의 의미**: `config/universities.json` 에 등재된 대학만 순위에
+> 참여한다. 2025년 기준 '대학교' 209개 중 134개교가 남고 이들은 전원 사립이다.
+> 국립·공립·과기원은 제외된다. 따라서 '전국순위'는 **등재 사립 134개교 기준**이다.
 
 ### `output/전체_대학_데이터.csv`
 ```
@@ -136,7 +189,8 @@ Windows 기준. Linux 배포 시 `NanumGothic` 등으로 변경.
 - GPT-4o 미사용 계정: `config.py`의 `GPT_MODEL = "gpt-4"` 로 변경
 
 ### Streamlit 실행 오류
-- 반드시 프로젝트 루트(`Hoseo-IR-/`)에서 실행해야 상대경로 정상 동작
+- 반드시 프로젝트 루트(`Hoseo-Research/`)에서 실행해야 상대경로 정상 동작
+  (`report_app/config.py:80` 이 import 시점에 `Path.cwd()` 를 1회 평가한다)
 
 ### CSS 적용 시 주의사항 (v3.0)
 - Streamlit CSS 우선순위 때문에 `!important` 필수
@@ -161,7 +215,7 @@ Windows 기준. Linux 배포 시 `NanumGothic` 등으로 변경.
 이 프로젝트는 **컴포넌트별 메모리 파일 시스템**을 사용한다. 모든 작업에서 아래 규칙을 따를 것.
 
 ### 메모리 파일 위치
-`~/.claude/projects/C--Users-----Desktop-IR---MCP/memory/`
+`~/.claude/projects/C--Users-----Desktop-Hoseo-Reasearch/memory/`
 
 ### 메모리 파일 목록
 | 파일 | 내용 | 참조 시점 |

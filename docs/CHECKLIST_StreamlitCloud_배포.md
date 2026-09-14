@@ -19,8 +19,9 @@
 
 - [ ] **[P0]** `.streamlit/secrets.toml` 생성 (로컬 테스트용) — 5분
   ```toml
-  [openai]
-  api_key = "sk-실제키값"
+  # app.py 는 평면 키를 읽는다. [openai] 테이블로 넣으면
+  # Streamlit 이 환경변수로 내보내지 않아 폴백까지 실패한다.
+  OPENAI_API_KEY = "sk-실제키값"
   ```
 
 - [ ] **[P0]** `.gitignore` 업데이트 — 5분
@@ -53,7 +54,7 @@
   - Line 50-55: `load_dotenv()` 유지하되, `st.secrets` 우선 조회 로직 추가
   - API Key 로드 우선순위:
     1. `st.session_state["api_key"]` (세션 입력)
-    2. `st.secrets["openai"]["api_key"]` (배포 환경)
+    2. `st.secrets["OPENAI_API_KEY"]` (배포 환경, 평면 키)
     3. `os.getenv("OPENAI_API_KEY")` (로컬 .env 폴백)
   - Line 582-583: `.env` 저장 로직을 클라우드에서는 비활성화
     ```python
@@ -123,7 +124,7 @@
 - [ ] **Streamlit Cloud 설정**
   1. [share.streamlit.io](https://share.streamlit.io) 접속
   2. GitHub 계정 연동 (Junghwamin)
-  3. Repository: `Junghwamin/Hoseo-IR-`
+  3. Repository: `Junghwamin/Hoseo-Research`
   4. Branch: `main`
   5. Main file path: `report_app/app.py`
   6. Python version: `3.11`
@@ -131,8 +132,7 @@
 - [ ] **Secrets 설정** (Streamlit Cloud 대시보드)
   - Settings > Secrets
   ```toml
-  [openai]
-  api_key = "sk-실제키값"
+  OPENAI_API_KEY = "sk-실제키값"
   ```
 
 ---
@@ -175,7 +175,7 @@ def _get_api_key():
     if st.session_state.get("api_key"):
         return st.session_state.api_key
     try:
-        return st.secrets["openai"]["api_key"]
+        return st.secrets["OPENAI_API_KEY"]
     except (KeyError, FileNotFoundError):
         return os.getenv("OPENAI_API_KEY", "")
 ```
@@ -210,8 +210,8 @@ def _setup_korean_font():
 
 ```toml
 # .streamlit/secrets.toml (로컬 개발용 - .gitignore에 추가!)
-[openai]
-api_key = "sk-..."
+# 최상위 평면 키여야 한다. app.py 는 st.secrets["OPENAI_API_KEY"] 를 읽는다.
+OPENAI_API_KEY = "sk-..."
 ```
 
 ### packages.txt

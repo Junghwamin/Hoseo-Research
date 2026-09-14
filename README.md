@@ -16,7 +16,7 @@
 ### 설치
 
 ```bash
-# Python 3.10 이상 필요
+# Python 3.12 권장 (Streamlit Cloud 의 runtime.txt 와 동일)
 pip install -r requirements.txt
 ```
 
@@ -70,9 +70,11 @@ streamlit run report_app/app.py
 ## 디렉토리 구조
 
 ```
-Hoseo-IR-/
+Hoseo-Research/
 ├── README.md                              ← 이 파일
 ├── requirements.txt                       ← Python 의존 라이브러리
+├── requirements-dev.txt                   ← 테스트 전용 의존성 (pytest)
+├── pytest.ini                             ← pytest 설정 (마커, xfail_strict)
 ├── start_app.bat                          ← 앱 바로 실행 런처
 ├── .env                                   ← OpenAI API Key (git 제외)
 ├── 전임교원_연구실적_전처리.py            ← 전처리 스크립트 (앱 내에서도 호출)
@@ -89,6 +91,17 @@ Hoseo-IR-/
 │   ├── 2016년_...xlsx ~ 2022년_...xlsx    ← 구형 포맷 (하위 헤더 없음)
 │   └── 2023년_...xlsx ~ 2025년_...xlsx    ← 신형 포맷
 │
+├── tests/                                 ← pytest 스위트 (340개)
+│   ├── conftest.py                        ← 샌드박스 cwd, matplotlib, 환경 격리
+│   ├── unit/                              ← 순수 함수 단위 테스트
+│   ├── contract/                          ← 모듈 간 키·컬럼 계약
+│   ├── integration/                       ← 실데이터 골든 회귀
+│   ├── apptest/                           ← streamlit.testing.v1 UI 테스트
+│   └── manual/CHECKLIST.md                ← 자동화 불가 항목 수동 체크리스트
+│
+├── docs/
+│   └── QA_REVIEW_REPORT.md                ← 코드 리뷰 및 검증 보고서
+│
 ├── config/                                ← 전처리 설정 파일
 │   ├── universities.json                  ← 대학 정보 및 캠퍼스 매핑 (136개교)
 │   └── regions.json                       ← 지역별 대학 리스트 (충청권 27개교)
@@ -96,7 +109,8 @@ Hoseo-IR-/
 └── output/                                ← 결과 파일 (자동 생성)
     ├── 전임교원_연구실적_전처리결과.xlsx
     ├── 전체_대학_데이터.csv
-    ├── 충청권_순위.csv
+    ├── 권역별_순위.csv
+    ├── 충청권_순위.csv   # 레거시 (하위 호환)
     └── reports/                           ← 생성된 Word 보고서
 ```
 
@@ -107,26 +121,26 @@ Hoseo-IR-/
 | 연도 | 학교명 | 전임교원수 | SCI/SCOPUS논문수 | 1인당논문수 | 전국순위 |
 |------|--------|------------|-------------------|-------------|----------|
 
-### `output/충청권_순위.csv`
+### `output/권역별_순위.csv` (현행 포맷)
+
+| 연도 | 학교명 | 전임교원수 | SCI/SCOPUS논문수 | 1인당논문수 | 권역명 | 권역순위 | 전국순위 |
+|---|---|---|---|---|---|---|---|
+
+6개 권역 전체를 담는다. 다중 캠퍼스 대학은 권역마다 한 행씩 나타난다.
+인코딩은 UTF-8 with BOM(utf-8-sig)이다.
+
+### `output/충청권_순위.csv` (레거시, 하위 호환용)
 
 | 연도 | 학교명 | 전임교원수 | SCI/SCOPUS논문수 | 1인당논문수 | 충청권순위 | 전국순위 |
-|------|--------|------------|-------------------|-------------|------------|----------|
+|---|---|---|---|---|---|---|
 
-- 인코딩: UTF-8 with BOM (`utf-8-sig`)
-- Raw 파일명 규칙: 파일명에 `YYYY년` 포함 필수
+읽을 때 자동으로 신형으로 변환된다. 새 코드는 권역별_순위.csv 를 쓸 것.
 
-## 비교 대학군
+> **전국순위의 의미**: `config/universities.json` 에 등재된 대학만 순위에
+> 참여한다. 2025년 기준 134개교가 남고 전원 사립이다. 국립·공립·과기원은
+> 제외되며 전임교원의 약 30.9% 가 빠진다. 따라서 '전국순위'와 '전국평균'은
+> **등재 사립 134개교 기준**이다.
 
-천안·아산 5개 대학 (`config.py`에서 수정 가능):
-- 순천향대학교, 선문대학교, 한서대학교, 나사렛대학교, **호서대학교**
-
-## 전처리 스크립트 단독 실행
-
-앱 없이 전처리만 실행할 수도 있습니다:
-
-```bash
-python 전임교원_연구실적_전처리.py
-```
 
 ### 처리 과정
 
@@ -157,6 +171,26 @@ python 전임교원_연구실적_전처리.py
 | python-docx | Word 보고서 조립 |
 | python-dotenv | API Key 환경변수 관리 |
 
+## 테스트
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q                       # 전체 (실제 GPT 호출 제외)
+pytest -q -m "not realdata"     # 실데이터 골든 제외, 빠름
+pytest -q tests/apptest         # UI 테스트만
+```
+
+마커는 `realdata`(추적 중인 Raw/output 사용), `slow`, `live`(실제 OpenAI 호출,
+기본 제외), `characterization`(현재 동작 기록), `needs_refactor` 다.
+
+`xfail_strict = true` 라서 **결함 잠금 테스트가 예상외로 통과하면 실패로
+떨어진다**. 남아 있는 `xfailed` 12건은 의도적으로 고치지 않은 항목이며,
+그중 하나라도 통과로 바뀌면 어떤 수정이 의도한 범위를 넘었다는 신호다.
+자세한 내용은 `docs/QA_REVIEW_REPORT.md` 를 참고한다.
+
+푸시하면 `.github/workflows/test.yml` 이 Ubuntu + Python 3.11 에서 같은
+스위트를 실행한다.
+
 ## 문제 해결
 
 | 증상 | 해결 |
@@ -166,6 +200,8 @@ python 전임교원_연구실적_전처리.py
 | 컬럼 탐지 실패 | 구형 포맷은 자동 폴백 지원, 그래도 실패 시 `find_columns()` 키워드 조정 |
 | GPT-4o 미사용 계정 | `config.py`에서 `GPT_MODEL = "gpt-4"`로 변경 |
 | Streamlit 실행 오류 | 반드시 프로젝트 루트에서 실행 |
+| 사이드바에 빈 페이지 링크 | `.streamlit/config.toml` 의 `showSidebarNavigation = false` 확인 |
+| 테스트가 `xpassed` 로 실패 | 의도적 xfail 이 통과한 것. 수정 범위가 넘쳤는지 확인 |
 
 ## 라이선스 (License)
 
@@ -179,7 +215,7 @@ python 전임교원_연구실적_전처리.py
 - ❌ **금지**: 상업적 이용 (상업적 이익이나 금전적 보상을 주된 목적으로 하는 모든 사용)
 - 📌 **인용 필수**: 본 코드를 사용한 연구물 발표 시 [`CITATION.cff`](./CITATION.cff)에 따른 인용 표기 요청
 
-상업적 사용을 원하시는 경우 별도의 라이선스 협의가 필요합니다. [GitHub Issues](https://github.com/Junghwamin/Hoseo-IR-/issues)를 통해 문의해 주세요.
+상업적 사용을 원하시는 경우 별도의 라이선스 협의가 필요합니다. [GitHub Issues](https://github.com/Junghwamin/Hoseo-Research/issues)를 통해 문의해 주세요.
 
 전체 라이선스 조항은 [`LICENSE`](./LICENSE) 및 [`NOTICE`](./NOTICE) 파일을 참조하시기 바랍니다.
 
