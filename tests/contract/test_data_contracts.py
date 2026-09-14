@@ -33,6 +33,9 @@ V01/V14 가 고쳐지면 행 수·연도별 대학 수는 바뀌므로, 그 수�
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
@@ -41,7 +44,7 @@ import report_app.chart_generator as cg
 import report_app.data_loader as dl
 import report_app.gpt_reporter as gr
 import report_app.report_builder as rb
-from tests.conftest import REALDATA_AVAILABLE, SANDBOX
+from tests.conftest import RAW_DIR, REALDATA_AVAILABLE, SANDBOX
 from tests.fixtures.fake_openai import make_fake_client
 from tests.fixtures.make_frames import simple_pair
 
@@ -314,6 +317,25 @@ def test_dlc01_gpt_프롬프트가_로더_JSON_을_직렬화할_수_있다():
 # INF-01 — 실제 output CSV 포맷 계약
 # ===========================================================================
 
+_RAW_YEAR_RE = re.compile(r"(20\d{2})\s*년")
+
+
+def _raw_years() -> list[int]:
+    """`Raw data/` 의 xlsx 파일명에서 연도를 뽑아 정렬해 돌려준다.
+
+    macOS 에서 만들어진 파일명은 NFD 로 분해돼 있을 수 있어 NFC 로 정규화한다.
+    디렉터리가 없으면 빈 리스트를 돌려주고, 호출부가 이 검사를 건너뛴다.
+    """
+    if not RAW_DIR.is_dir():
+        return []
+    years = set()
+    for path in RAW_DIR.glob("*.xlsx"):
+        match = _RAW_YEAR_RE.search(unicodedata.normalize("NFC", path.name))
+        if match:
+            years.add(int(match.group(1)))
+    return sorted(years)
+
+
 @realdata
 @pytest.mark.realdata
 @pytest.mark.parametrize(
@@ -348,9 +370,27 @@ def test_inf01_CSV_컬럼순서와_BOM_과_결측(filename, expected_columns):
     nan_counts = {c: int(frame[c].isna().sum()) for c in frame.columns}
     assert all(v == 0 for v in nan_counts.values()), f"{filename}: 결측 발생 {nan_counts}"
 
-    assert sorted(frame["연도"].unique().tolist()) == list(range(2016, 2026)), (
-        f"{filename}: 연도 집합이 2016~2025 가 아니다"
+    # 연도 집합은 `Raw data/` 에 있는 원본 파일에서 도출한다. 리터럴로 박으면
+    # 새 연도 데이터가 들어올 때마다 계약 테스트가 깨진다 — 그건 결함 신호가
+    # 아니라 정상 운영이다. 진짜 계약은 "출력 CSV 가 원본 연도를 빠짐없이,
+    # 그리고 그것만 담는다" 이다.
+    expected_years = _raw_years()
+    actual_years = sorted(frame["연도"].unique().tolist())
+    if expected_years:
+        assert actual_years == expected_years, "\n".join([
+            f"{filename}: 연도 집합이 Raw data/ 와 다르다",
+            f"CSV: {actual_years}",
+            f"Raw: {expected_years}",
+            "→ 원본을 추가했다면 전처리를 다시 돌려 output/ 을 갱신해야 한다",
+        ])
+    else:
+        assert actual_years, f"{filename}: 연도가 하나도 없다"
+
+    assert actual_years == list(range(actual_years[0], actual_years[-1] + 1)), (
+        f"{filename}: 연도가 연속이 아니다 ({actual_years}) — 중간 연도가 빠지면 "
+        f"시계열 차트와 증감 계산이 조용히 어긋난다"
     )
+    assert actual_years[0] == 2016, f"{filename}: 시작 연도가 2016 이 아니다"
 
 
 @realdata
