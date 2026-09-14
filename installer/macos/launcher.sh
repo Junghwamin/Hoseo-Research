@@ -30,6 +30,7 @@ mkdir -p "$DATA_DIR/Raw data"
 # .streamlit 설정 복사 (최초 실행 시)
 if [ ! -d "$DATA_DIR/.streamlit" ]; then
     cp -R "$APP_DIR/.streamlit" "$DATA_DIR/.streamlit"
+    rm -f "$DATA_DIR/.streamlit/secrets.toml"  # 사용자 데이터 영역에도 시크릿을 두지 않는다
 fi
 
 # config 복사 (최초 실행 시)

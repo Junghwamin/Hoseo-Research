@@ -8,7 +8,7 @@
 ; ===========================================================================
 
 #define MyAppName "호서대학교 정화민 - 연구실적 분석 포털"
-#define MyAppVersion "3.0"
+#define MyAppVersion "5.0"
 #define MyAppPublisher "정화민 (Junghwamin)"
 #define MyAppExeName "launcher.pyw"
 

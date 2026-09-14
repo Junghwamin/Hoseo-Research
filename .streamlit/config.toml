@@ -12,3 +12,14 @@ backgroundColor = "#FAFAFA"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#3F3F46"
 font = "sans serif"
+
+[client]
+# Streamlit 은 메인 스크립트 옆의 `pages/` 를 멀티페이지 v1 디렉터리로 인식해
+# 사이드바에 자동 네비게이션(app/home/research/settings)을 주입한다.
+# `report_app/pages/` 의 세 모듈은 함수 정의만 있고 진입점 호출이 없어
+# 그 링크를 누르면 빈 화면이 된다. 앱은 자체 사이드바로 라우팅하므로 끈다.
+#
+# 잔여 위험: 이 설정은 네비게이션 UI 만 숨긴다. `_mpa_v1()` 실행 자체와
+# /home, /research, /settings URL 은 그대로 남는다. 근본 해결은
+# `report_app/pages/` 를 `views/` 등으로 개명하는 것이다.
+showSidebarNavigation = false

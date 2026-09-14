@@ -154,6 +154,43 @@ def install_dependencies():
 # ---------------------------------------------------------------------------
 # 4. 앱 파일 복사
 # ---------------------------------------------------------------------------
+def data_csv_names() -> list[str]:
+    """번들에 넣을 output CSV 파일명을 `report_app/config.py` 에서 뽑아 온다.
+
+    파일명을 여기에 하드코딩하면 config 가 바뀔 때 조용히 어긋난다.
+    실제로 그렇게 어긋나 신형 `권역별_순위.csv` 가 번들에서 빠졌고,
+    설치본이 영원히 레거시(충청권 1개 권역)로만 동작했다.
+
+    config 를 import 하지 않고 AST 로 읽는다. `config.py` 는 import 시점에
+    `Path.cwd()` 를 평가하므로(:80) 빌드 스크립트의 cwd 에 의존하게 만들고 싶지 않다.
+
+    Returns:
+        ["전체_대학_데이터.csv", "권역별_순위.csv", "충청권_순위.csv"] 같은 목록.
+    """
+    import ast
+
+    config_src = (PROJECT_ROOT / "report_app" / "config.py").read_text(encoding="utf-8")
+    wanted = {"NATIONAL_CSV", "REGIONAL_CSV", "REGIONAL_CSV_LEGACY"}
+    names: list[str] = []
+    for node in ast.walk(ast.parse(config_src)):
+        if not isinstance(node, ast.Assign):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id in wanted):
+            continue
+        # `DATA_DIR / "전체_대학_데이터.csv"` 형태에서 오른쪽 문자열을 집는다.
+        for sub in ast.walk(node.value):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value.endswith(".csv"):
+                if sub.value not in names:
+                    names.append(sub.value)
+    if not names:
+        raise RuntimeError(
+            "report_app/config.py 에서 CSV 파일명을 찾지 못했다 — "
+            "상수 이름이 바뀌었는지 확인할 것"
+        )
+    return names
+
+
 def copy_app_files():
     """프로젝트 앱 파일을 빌드 디렉토리에 복사한다."""
     if APP_DIR.exists():
@@ -175,9 +212,13 @@ def copy_app_files():
     )
 
     # .streamlit/ 설정
+    # secrets.toml 은 절대 번들에 넣지 않는다. 유지보수자가 로컬 테스트용으로
+    # .streamlit/secrets.toml 을 만들어 둔 상태에서 빌드하면 실제 API Key 가
+    # 배포 .exe 안으로 들어가기 때문이다(.gitignore 는 git 만 막고 빌드는 못 막는다).
     shutil.copytree(
         PROJECT_ROOT / ".streamlit",
         APP_DIR / ".streamlit",
+        ignore=shutil.ignore_patterns("secrets.toml", "*.secrets.toml", "__pycache__"),
     )
 
     # 전처리 스크립트
@@ -194,7 +235,7 @@ def copy_app_files():
 
     # output 디렉토리 + 기존 CSV 데이터 복사
     (APP_DIR / "output" / "reports").mkdir(parents=True, exist_ok=True)
-    for csv_name in ["전체_대학_데이터.csv", "충청권_순위.csv"]:
+    for csv_name in data_csv_names():
         src = PROJECT_ROOT / "output" / csv_name
         if src.exists():
             shutil.copy2(src, APP_DIR / "output" / csv_name)

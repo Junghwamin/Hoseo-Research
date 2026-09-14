@@ -38,3 +38,9 @@ desktop.ini
 
 # Streamlit secrets (API Key 유출 방지)
 .streamlit/secrets.toml
+
+# QA 테스트용 핀 고정 가상환경
+.venv-qa/
+
+# pytest
+.pytest_cache/

@@ -21,7 +21,7 @@ BUILD_DIR="$PROJECT_ROOT/build/macos"
 APP_NAME="연구실적 분석 포털"
 APP_BUNDLE="$BUILD_DIR/${APP_NAME}.app"
 DIST_DIR="$PROJECT_ROOT/dist/macos"
-APP_VERSION="3.0"
+APP_VERSION="5.0"
 
 # python-build-standalone 릴리즈 (완전 독립형, relocatable)
 # https://github.com/astral-sh/python-build-standalone/releases
@@ -88,7 +88,7 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/app/Raw data"
 # Info.plist 복사
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 # Info.plist 버전 업데이트
-sed -i '' "s/3.0/$APP_VERSION/g" "$APP_BUNDLE/Contents/Info.plist"
+sed -i '' "s/__APP_VERSION__/$APP_VERSION/g" "$APP_BUNDLE/Contents/Info.plist"
 
 # 아이콘 복사 (있으면)
 if [ -f "$SCRIPT_DIR/icon.icns" ]; then
@@ -105,7 +105,11 @@ cp -R "$PYTHON_ROOT" "$APP_BUNDLE/Contents/Resources/python"
 # 앱 소스 코드 복사
 cp -R "$PROJECT_ROOT/report_app" "$APP_BUNDLE/Contents/Resources/app/report_app"
 cp -R "$PROJECT_ROOT/config" "$APP_BUNDLE/Contents/Resources/app/config"
+# secrets.toml 은 절대 번들에 넣지 않는다. 유지보수자가 로컬 테스트용으로
+# .streamlit/secrets.toml 을 만들어 둔 상태에서 빌드하면 실제 API Key 가
+# 배포 .dmg 안으로 들어간다(.gitignore 는 git 만 막고 빌드는 못 막는다).
 cp -R "$PROJECT_ROOT/.streamlit" "$APP_BUNDLE/Contents/Resources/app/.streamlit"
+rm -f "$APP_BUNDLE/Contents/Resources/app/.streamlit/secrets.toml"
 cp "$PROJECT_ROOT/전임교원_연구실적_전처리.py" "$APP_BUNDLE/Contents/Resources/app/"
 cp "$PROJECT_ROOT/requirements.txt" "$APP_BUNDLE/Contents/Resources/app/"
 
